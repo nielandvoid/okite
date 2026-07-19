@@ -9,6 +9,9 @@ const {
     TextInputStyle
 } = require("discord.js"); require("dotenv").config();
 
+const http = require('http');
+http.createServer((req, res) => res.end('okite online')).listen(process.env.PORT || 3000);
+
 const client = new Client({intents: [GatewayIntentBits.Guilds]});
 
 const rules = require('./rules.json')
@@ -106,9 +109,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 console.log(log);
 
-                let logChannel = config.logChannelId ? interaction.guild.channels.cache.get(config.logChannelId) : null;
+                const logChannelId = config.logChannelId || process.env.LOG_CHANNEL_ID;
+                let logChannel = logChannelId ? interaction.guild.channels.cache.get(logChannelId) : null;
                 if (!logChannel) {
-                    logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs');
+                    logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs' || c.name === 'mod-logs');
                 }
                 if (logChannel) {
                     await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
