@@ -10,7 +10,10 @@ const {
 } = require("discord.js"); require("dotenv").config();
 
 const http = require('http');
-http.createServer((req, res) => res.end('okite online')).listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => res.end('okite online')).listen(PORT, () => {
+    console.log(`http server listening on port ${PORT}`);
+});
 
 const client = new Client({intents: [GatewayIntentBits.Guilds]});
 
