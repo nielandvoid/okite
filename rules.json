@@ -1,0 +1,62 @@
+[
+    {
+        "id": "r1",
+        "label": "Rule 1: Civility Rule",
+        "desc": "Be kind, respectful, and helpful.",
+        "text": ">>> **Rule #1: Civility Rule**\nBe kind and helpful to other users. Harassment, homophobia, transphobia, xenophobia, hate speech, discrimination, or any other form of hostility & hate will not be tolerated.\nConstructive criticism is fine, but do it in a way that doesn't attack someone directly. Remember, there is a real human behind the screens. Learn to have sympathy towards others.\nDo not dox yourself or others and do not share PII (Personally Identifiable Information) about anyone. Also, please refrain from discussing about self-harm."
+    },
+    {
+        "id": "r2",
+        "label": "Rule 2: No NSFW/NSFL",
+        "desc": "No NSFW, erotica, gore, or graphic content.",
+        "text": ">>> **Rule #2: No NSFW/NSFL Content & Content Policy**\nKeep pornographic content, hentai or anything NSFW like erotica stuff out of this community, we don't want them here.\nWe also don't want any other inappropriate stuff like gore or extremely graphic or disturbing images, videos, or text that may cause intense discomfort, distress, or trauma to viewers."
+    },
+    {
+        "id": "r2_1",
+        "label": "Rule 2.1: No Politics",
+        "desc": "Discussions involving or related to politics are forbidden.",
+        "text": ">>> Extension to **Rule #2** under **Content Policy**:\nDiscussions involving or related to **politics** are forbidden from now on in all channels of the server until further notice."
+    },
+    {
+        "id": "r3",
+        "label": "Rule 3: Channel Policy",
+        "desc": "Use dedicated channels for tech, study, resources, and bots.",
+        "text": ">>> **Rule #3: Channel Policy**\n<#1247172466103685231> should only be used for programming/tech centric discussions, same policy applies for <#1244644765409218611> - discussions in <#1244644765409218611> should stay limited to serious stuff like exams, education, studies, exams etc. <#1193548874334351360> should only be used for sharing resources. This policy will be upheld in <#1236905406706745385>, <#1247997551966163038> & other channels in the text category too. Always check our channel policy before interacting in that channel.\nUse your bot-commands in <#1193408666708226138> and the AI bots in their dedicated channels. Don't flood or clutter text/chat channels with bots.\nBreaking this policy/rule, will result in a warn - continued rule violations might in a timeout, hardmute or ban."
+    },
+    {
+        "id": "r4",
+        "label": "Rule 4: Promotion Policy",
+        "desc": "Projects welcome. No external groups, servers, or MLMs.",
+        "text": ">>> **Rule #4: Promotion Policy**\nYour are more than welcome to promote or share your projects, GitHub/GitLab repos, Linux rices etc. here with their links. You can't promote external WhatsApp, Telegram, Instagram groups or Discord Servers or Subreddits here. Also keep your MLM and referral student programs away from this server. This includes promoting servers through DMs also."
+    },
+    {
+        "id": "r5",
+        "label": "Rule 5: No Piracy",
+        "desc": "No pirated content or links to pirated material.",
+        "text": ">>> **Rule #5: No Piracy, No Distribution of Copyrighted Content Policy**\nPiracy isn't allowed. We respect the intellectual property rights. Sharing links to pirated content will result in a ban. Any kind of piracy is not allowed in the server. Learn how to respect the hard work of others."
+    },
+    {
+        "id": "r5_1",
+        "label": "Rule 5.1: Piracy Discussions",
+        "desc": "No threads/discussions promoting or suggesting pirated sources.",
+        "text": ">>> Extension to **Rule #5** under **No Piracy / Copyrighted Content Policy**:\nThe rule is inclusive of but not limited to threads / discussions / messages promoting or implying use of pirated content, mentioning source(s) of pirated content, or suggesting safer ways to use pirated content. All such threads are deemed as violations of the rule and are susceptible to liable moderative actions. **Refrain from initiating / participating in threads linked to piracy.**"
+    },
+    {
+        "id": "r6",
+        "label": "Rule 6: No Hate Policy",
+        "desc": "Zero tolerance for hate speech, discrimination, or slurs.",
+        "text": ">>> **Rule #6: No Hate Policy**\nr/BTechtards is a pro-LGBTQIA+ community. We don't tolerate any kind of homophobia, queerphobia, transphobia, heterophobia etc here. Any derogatory comments, slurs, or attacks based on someone's sexual orientation, gender identity, or expression are strictly prohibited. This community is a safe space for everyone.\nRacist remarks, slurs, stereotypes, or any form of discrimination based on race, ethnicity, or nationality are unacceptable. We celebrate diversity and value the unique perspectives that people from all backgrounds bring to our community.\nAny form of discrimination, derogatory remarks, or hate speech based on a person's sex, gender, or gender identity will not be tolerated. Everyone deserves to be treated with respect and dignity.\nDisparaging comments or attacks based on someone's religious beliefs or lack thereof are forbidden. Respect for all religious beliefs and practices is essential.\nDiscrimination or derogatory comments towards individuals with disabilities, whether physical or mental, are strictly prohibited. We strive to create an environment where everyone feels welcome and valued."
+    },
+    {
+        "id": "r7",
+        "label": "Rule 7: No College/Tier Shaming",
+        "desc": "No shaming based on college, tier, branch, or package.",
+        "text": ">>> **Rule #7: No College, Tier, Branch or Package Shaming**\nAvoid shaming or making anyone feel inferior/uncomfortable for their college, tier, branch or anything similar. Everyone is welcome here irrespective of their college, tier and branch. We are committed to make everyone feel welcome here.\nThis rule is enforced on moderator discretion and is not enforced generally. **This is more of a suggestion than an actual rule.**"
+    },
+    {
+        "id": "r8",
+        "label": "Rule 8: Discord TOS & Guidelines",
+        "desc": "Adhere to Discord's Terms of Service and Community Guidelines.",
+        "text": ">>> **Rule #8: Discord Terms of Service & Community Guidelines**\nAll members must adhere to [Discord's Terms of Service](<https://dis.gd/tos>) and [Community Guidelines](<https://dis.gd/guidelines>). Violations of Discord TOS will result in an immediate ban and report to Discord Trust & Safety."
+    }
+]
