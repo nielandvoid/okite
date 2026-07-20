@@ -9,6 +9,10 @@ const commands = [
         .setName("mark / purge range")
         .setType(ApplicationCommandType.Message),
 
+    new ContextMenuCommandBuilder()
+        .setName("reply")
+        .setType(ApplicationCommandType.Message),
+
     new SlashCommandBuilder()
         .setName("setlog")
         .setDescription("sets the log channel for purged messages")

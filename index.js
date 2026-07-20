@@ -161,6 +161,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 ephemeral: true
             });
         }
+
+        if (commandName.toLowerCase() === 'reply') {
+            const modal = new ModalBuilder()
+                .setCustomId(`reply_modal:${targetMessage.id}`)
+                .setTitle('reply as Okite');
+
+            const replyInput = new TextInputBuilder()
+                .setCustomId('reply_text')
+                .setLabel('reply message')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('type your reply here...')
+                .setRequired(true);
+
+            const row = new ActionRowBuilder().addComponents(replyInput);
+            modal.addComponents(row);
+
+            return interaction.showModal(modal);
+        }
     }
 
     // 
@@ -197,6 +215,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // modal submit handler
     if (interaction.isModalSubmit()) {
         const { customId, fields } = interaction;
+
+        if (customId.startsWith('reply_modal:')) {
+            await interaction.deferReply({ ephemeral: true });
+            const targetMessageId = customId.split(':')[1];
+            const replyText = fields.getTextInputValue('reply_text');
+
+            const targetMessage = await interaction.channel.messages.fetch(targetMessageId).catch(() => null);
+            if (!targetMessage) {
+                return interaction.editReply(`original message not found.`);
+            }
+
+            await targetMessage.reply(replyText);
+            return interaction.editReply(`reply sent.`);
+        }
+
         const [, action, targetUserId, targetMessageId] = customId.split(':');
         const reason = fields.getTextInputValue('reason');
 
