@@ -217,8 +217,39 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
             if (!targetMessage) {
                 return interaction.editReply(`original message not found.`);
             }
-            await targetMessage.reply(`staff notice:\n${reason}`);
-            return interaction.editReply(`rule citation posted.`);
+
+            // reply & ping author
+            await targetMessage.reply(`staff notice for <@${targetMessage.author.id}>:\n${reason}`);
+
+            // log cited message
+            const time = targetMessage.createdAt.toLocaleTimeString();
+            let files = '';
+            if (targetMessage.attachments.size > 0) {
+                const catboxUrls = await Promise.all(
+                    Array.from(targetMessage.attachments.values()).map(a => uploadToCatbox(a.url, a.name))
+                );
+                files = ` [files: ${catboxUrls.join(' ')}]`;
+            }
+
+            const header = `rule citation by: ${interaction.user.username} // user: ${targetMessage.author.username} // channel: #${interaction.channel.name}\n---`;
+            const logLine = `[${time}] ${targetMessage.author.username}: ${targetMessage.content}${files}`;
+            const log = `${header}\n${logLine}`;
+
+            console.log(log);
+
+            const logChannelId = config.logChannelId || process.env.LOG_CHANNEL_ID;
+            let logChannel = logChannelId ? interaction.guild.channels.cache.get(logChannelId) : null;
+            if (!logChannel) {
+                logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs' || c.name === 'mod-logs');
+            }
+            if (logChannel) {
+                await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+            }
+
+            // delete parent message
+            await targetMessage.delete().catch(() => null);
+
+            return interaction.editReply(`rule citation posted & parent message deleted.`);
         }
 
     } catch (error) {
