@@ -15,7 +15,7 @@
         "id": "r2_1",
         "label": "Rule 2.1: No Politics",
         "desc": "Discussions involving or related to politics are forbidden.",
-        "text": ">>> Extension to **Rule #2** under **Content Policy**:\nDiscussions involving or related to **politics** are forbidden from now on in all channels of the server until further notice."
+        "text": ">>> Extension to **Rule #2** under **Content Policy**:\nDiscussions involving or related to **politics** are forbidden in all channels of the server. This includes but is not limited to political debates, discussions about political parties, politicians, elections, government policies, and political ideologies. Any content that is deemed political in nature will be removed by the moderators. **Refrain from initiating or participating in political threads.**"
     },
     {
         "id": "r3",
