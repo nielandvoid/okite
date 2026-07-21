@@ -7,10 +7,16 @@ const ruleSchema = new mongoose.Schema({
     text: { type: String, required: true }
 }, { _id: false });
 
+const lockedChannelSchema = new mongoose.Schema({
+    channelId: { type: String, required: true },
+    lockedRoleIds: [String]
+}, { _id: false });
+
 const guildSchema = new mongoose.Schema({
     guildId: { type: String, required: true, unique: true },
     logChannelId: { type: String, default: null },
-    rules: [ruleSchema]
+    rules: [ruleSchema],
+    lockedChannels: [lockedChannelSchema]
 }, { timestamps: true });
 
 module.exports = mongoose.model('Guild', guildSchema);

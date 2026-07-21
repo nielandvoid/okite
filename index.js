@@ -44,7 +44,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // dm restrict
     if (!interaction.guild) {
-        return interaction.reply({ content: 'okite commands can only be used inside a server.', ephemeral: true });
+        return interaction.reply({ content: 'okite is a server-only utility.', ephemeral: true });
     }
 
     const perms = interaction.memberPermissions;
@@ -55,7 +55,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const { commandName, options, guildId } = interaction;
 
         if (['setlog', 'rule', 'lock', 'unlock'].includes(commandName) && !isManager) {
-            return interaction.reply({ content: 'you need **Manage Channels** permission to use this command.', ephemeral: true });
+            return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
 
         if (commandName === 'setlog') {
@@ -151,19 +151,90 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const rolesToUpdate = [interaction.guild.id];
-
-            targetChannel.permissionOverwrites.cache.forEach((overwrite, id) => {
-                if (overwrite.type === 0 && overwrite.allow.has(PermissionFlagsBits.SendMessages)) {
-                    rolesToUpdate.push(id);
+            if (isLocking) {
+                let lockedRoleIds = [];
+                let everyoneOverwrite = targetChannel.permissionOverwrites.cache.get(interaction.guild.id);
+                
+                const everyoneWasDenied = everyoneOverwrite && everyoneOverwrite.deny.has(PermissionFlagsBits.SendMessages);
+                if (!everyoneWasDenied) {
+                    lockedRoleIds.push(interaction.guild.id);
                 }
-            });
 
-            for (const roleId of rolesToUpdate) {
-                await targetChannel.permissionOverwrites.edit(roleId, {
-                    SendMessages: isLocking ? false : null,
-                    SendMessagesInThreads: isLocking ? false : null
-                }).catch(() => null);
+                targetChannel.permissionOverwrites.cache.forEach((overwrite, id) => {
+                    if (overwrite.type === 0 && id !== interaction.guild.id) {
+                        if (overwrite.allow.has(PermissionFlagsBits.SendMessages)) {
+                            lockedRoleIds.push(id);
+                        }
+                    }
+                });
+
+                for (const roleId of lockedRoleIds) {
+                    await targetChannel.permissionOverwrites.edit(roleId, {
+                        SendMessages: false,
+                        SendMessagesInThreads: false
+                    }).catch(() => null);
+                }
+
+                if (everyoneWasDenied) {
+                    await targetChannel.permissionOverwrites.edit(interaction.guild.id, {
+                        SendMessages: false,
+                        SendMessagesInThreads: false
+                    }).catch(() => null);
+                }
+
+                if (process.env.MONGODB_URI) {
+                    await Guild.findOneAndUpdate(
+                        { guildId: interaction.guildId },
+                        { $pull: { lockedChannels: { channelId: targetChannel.id } } }
+                    );
+                    await Guild.findOneAndUpdate(
+                        { guildId: interaction.guildId },
+                        { $push: { lockedChannels: { channelId: targetChannel.id, lockedRoleIds } } }
+                    );
+                }
+
+            } else {
+                let rolesToRestore = [];
+                let dbRecordFound = false;
+
+                if (process.env.MONGODB_URI) {
+                    const guildConfig = await Guild.findOne({ guildId: interaction.guildId });
+                    const record = guildConfig?.lockedChannels?.find(c => c.channelId === targetChannel.id);
+                    if (record) {
+                        rolesToRestore = record.lockedRoleIds;
+                        dbRecordFound = true;
+
+                        guildConfig.lockedChannels = guildConfig.lockedChannels.filter(c => c.channelId !== targetChannel.id);
+                        await guildConfig.save();
+                    }
+                }
+
+                if (!dbRecordFound) {
+                    targetChannel.permissionOverwrites.cache.forEach((overwrite, id) => {
+                        if (overwrite.type === 0 && id !== interaction.guild.id) {
+                            if (overwrite.deny.has(PermissionFlagsBits.SendMessages)) {
+                                rolesToRestore.push(id);
+                            }
+                        }
+                    });
+                    if (rolesToRestore.length === 0) {
+                        rolesToRestore.push(interaction.guild.id);
+                    }
+                }
+
+                for (const roleId of rolesToRestore) {
+                    if (roleId === interaction.guild.id) {
+                        await targetChannel.permissionOverwrites.edit(roleId, {
+                            SendMessages: null,
+                            SendMessagesInThreads: null
+                        }).catch(() => null);
+                    } else {
+                        await targetChannel.permissionOverwrites.edit(roleId, {
+                            SendMessages: true,
+                            SendMessagesInThreads: true
+                        }).catch(() => null);
+                    }
+                }
             }
 
             const notice = isLocking ? 'channel locked.' : 'channel unlocked.';
