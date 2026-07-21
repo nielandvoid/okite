@@ -6,7 +6,8 @@ const {
     StringSelectMenuBuilder,
     ModalBuilder,
     TextInputBuilder,
-    TextInputStyle
+    TextInputStyle,
+    PermissionFlagsBits
 } = require("discord.js"); require("dotenv").config();
 
 const http = require('http');
@@ -125,6 +126,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 return interaction.reply({ content: `**configured rules:**\n${ruleList}`, ephemeral: true });
             }
         }
+
+        if (commandName === 'lock' || commandName === 'unlock') {
+            const isLocking = commandName === 'lock';
+            const targetChannel = options.getChannel('channel') || interaction.channel;
+
+            if (!targetChannel.isTextBased()) {
+                return interaction.reply({ content: 'target must be a text channel.', ephemeral: true });
+            }
+
+            await interaction.deferReply({ ephemeral: true });
+
+            const rolesToUpdate = [interaction.guild.id];
+
+            targetChannel.permissionOverwrites.cache.forEach((overwrite, id) => {
+                if (overwrite.type === 0 && overwrite.allow.has(PermissionFlagsBits.SendMessages)) {
+                    rolesToUpdate.push(id);
+                }
+            });
+
+            for (const roleId of rolesToUpdate) {
+                await targetChannel.permissionOverwrites.edit(roleId, {
+                    SendMessages: isLocking ? false : null,
+                    SendMessagesInThreads: isLocking ? false : null
+                }).catch(() => null);
+            }
+
+            const notice = isLocking 
+                ? '**channel has been locked.**' 
+                : '**channel unlocked.**';
+
+            await targetChannel.send(notice).catch(() => null);
+            return interaction.editReply(`channel <#${targetChannel.id}> has been ${isLocking ? 'locked' : 'unlocked'}.`);
+        }
     }
 
     if (interaction.isMessageContextMenuCommand()) {
@@ -146,7 +180,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 });
             }
 
-            // A
+            //   
             await interaction.deferReply({ ephemeral: true });
 
             try {
@@ -227,7 +261,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 value: rule.id
             }));
 
-            // A
+            //   
             options.push({
                 label: 'custom',
                 description: 'provide manually, reason(s) for this action.',
@@ -272,7 +306,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const [action, targetUserId, targetMessageId] = customId.split(':');
         const selectedValue = values[0];
 
-        // if custom reason, show modal
+        // 
         if (selectedValue === 'custom') {
             const modal = new ModalBuilder()
                 .setCustomId(`modal:${action}:${targetUserId}:${targetMessageId}`)

@@ -42,6 +42,24 @@ const commands = [
             sub.setName("list")
                .setDescription("list all rules configured for this server")
         ),
+
+    new SlashCommandBuilder()
+        .setName("lock")
+        .setDescription("locks specified channel (defaults to current channel)")
+        .addChannelOption(option =>
+            option.setName("channel")
+                .setDescription("the channel to lock")
+                .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName("unlock")
+        .setDescription("unlocks specified channel (defaults to current channel)")
+        .addChannelOption(option =>
+            option.setName("channel")
+                .setDescription("the channel to unlock")
+                .setRequired(false)
+        ),
 ];
 
 const rest = new REST({version: "10"}).setToken(process.env.DISCORD_TOKEN);
