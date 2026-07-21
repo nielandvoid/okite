@@ -21,6 +21,27 @@ const commands = [
                 .setDescription("the channel to send logs to")
                 .setRequired(true)
         ),
+
+    new SlashCommandBuilder()
+        .setName("rule")
+        .setDescription("manage server rules")
+        .addSubcommand(sub =>
+            sub.setName("add")
+               .setDescription("add a new server rule")
+        )
+        .addSubcommand(sub =>
+            sub.setName("remove")
+               .setDescription("remove a server rule by ID")
+               .addStringOption(opt =>
+                   opt.setName("id")
+                      .setDescription("the rule ID (e.g. r1)")
+                      .setRequired(true)
+               )
+        )
+        .addSubcommand(sub =>
+            sub.setName("list")
+               .setDescription("list all rules configured for this server")
+        ),
 ];
 
 const rest = new REST({version: "10"}).setToken(process.env.DISCORD_TOKEN);
@@ -38,6 +59,5 @@ const rest = new REST({version: "10"}).setToken(process.env.DISCORD_TOKEN);
   } catch (error) {
     console.error('error registering commands:', error);
   }
-  process.exit(0);
 }
 )();
