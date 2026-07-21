@@ -42,8 +42,22 @@ client.once(Events.ClientReady, (readyClient) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
 
+    // dm restrict
+    if (!interaction.guild) {
+        return interaction.reply({ content: 'okite commands can only be used inside a server.', ephemeral: true });
+    }
+
+    const perms = interaction.memberPermissions;
+    const isMod = perms && (perms.has(PermissionFlagsBits.ManageMessages) || perms.has(PermissionFlagsBits.Administrator));
+    const isManager = perms && (perms.has(PermissionFlagsBits.ManageChannels) || perms.has(PermissionFlagsBits.Administrator));
+
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
+
+        if (['setlog', 'rule', 'lock', 'unlock'].includes(commandName) && !isManager) {
+            return interaction.reply({ content: 'you need **Manage Channels** permission to use this command.', ephemeral: true });
+        }
+
         if (commandName === 'setlog') {
             const channel = options.getChannel('channel');
             if (process.env.MONGODB_URI) {
@@ -152,13 +166,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 }).catch(() => null);
             }
 
-            const notice = isLocking 
-                ? 'channel has been locked.' 
-                : 'channel unlocked.';
+            const notice = isLocking ? 'channel locked.' : 'channel unlocked.';
 
             await targetChannel.send(notice).catch(() => null);
-            return interaction.editReply(`channel <#${targetChannel.id}> has been ${isLocking ? 'locked' : 'unlocked'}.`);
+            return interaction.editReply(`channel <#${targetChannel.id}> ${isLocking ? 'locked' : 'unlocked'}.`);
         }
+    }
+
+    if (!isMod) {
+        return interaction.reply({ content: 'missing permission.', ephemeral: true });
     }
 
     if (interaction.isMessageContextMenuCommand()) {

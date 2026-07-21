@@ -1,21 +1,25 @@
-const { REST, Routes, ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder } = require("discord.js"); require("dotenv").config();
+const { REST, Routes, ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js"); require("dotenv").config();
 
 const commands = [
     new ContextMenuCommandBuilder()
         .setName("lookup")
-        .setType(ApplicationCommandType.Message),
+        .setType(ApplicationCommandType.Message)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new ContextMenuCommandBuilder()
         .setName("mark / purge range")
-        .setType(ApplicationCommandType.Message),
+        .setType(ApplicationCommandType.Message)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new ContextMenuCommandBuilder()
         .setName("reply")
-        .setType(ApplicationCommandType.Message),
+        .setType(ApplicationCommandType.Message)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
     new SlashCommandBuilder()
         .setName("setlog")
         .setDescription("sets the log channel for purged messages")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
         .addChannelOption(option =>
             option.setName("channel")
                 .setDescription("the channel to send logs to")
@@ -25,6 +29,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName("rule")
         .setDescription("manage server rules")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
         .addSubcommand(sub =>
             sub.setName("add")
                .setDescription("add a new server rule")
@@ -46,6 +51,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName("lock")
         .setDescription("locks specified channel (defaults to current channel)")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
         .addChannelOption(option =>
             option.setName("channel")
                 .setDescription("the channel to lock")
@@ -55,6 +61,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName("unlock")
         .setDescription("unlocks specified channel (defaults to current channel)")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
         .addChannelOption(option =>
             option.setName("channel")
                 .setDescription("the channel to unlock")
