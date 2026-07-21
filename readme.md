@@ -1,4 +1,6 @@
 # okite
+![okite](okite_visual.png)
+
 context-menu rule citation & range purge utility for r/BTechtards Discord
 
 built with node and discord.js.
