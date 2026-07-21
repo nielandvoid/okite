@@ -153,8 +153,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             const notice = isLocking 
-                ? '**channel has been locked.**' 
-                : '**channel unlocked.**';
+                ? 'channel has been locked.' 
+                : 'channel unlocked.';
 
             await targetChannel.send(notice).catch(() => null);
             return interaction.editReply(`channel <#${targetChannel.id}> has been ${isLocking ? 'locked' : 'unlocked'}.`);
