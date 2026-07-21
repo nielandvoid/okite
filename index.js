@@ -18,7 +18,7 @@ http.createServer((req, res) => res.end('okite online')).listen(PORT, () => {
 const client = new Client({intents: [GatewayIntentBits.Guilds]});
 
 const mongoose = require('mongoose');
-const Guild = require('./models/Guild');
+const Guild = require('./models/guild');
 
 if (process.env.MONGODB_URI) {
     mongoose.connect(process.env.MONGODB_URI)
