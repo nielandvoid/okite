@@ -59,6 +59,16 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
+        .setName("history")
+        .setDescription("shows recorded rule citations / infractions for a user")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addUserOption(option =>
+            option.setName("user")
+                .setDescription("the user to look up")
+                .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
         .setName("unlock")
         .setDescription("unlocks specified channel (defaults to current channel)")
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)

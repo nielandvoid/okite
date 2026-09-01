@@ -7,7 +7,9 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    PermissionFlagsBits
+    PermissionFlagsBits,
+    ButtonBuilder,
+    ButtonStyle
 } = require("discord.js"); require("dotenv").config();
 
 const http = require('http');
@@ -27,11 +29,36 @@ if (process.env.MONGODB_URI) {
         .catch(err => console.error('mongodb connection error:', err));
 }
 
+const { createClient } = require('@supabase/supabase-js');
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+    : null;
+
 const rules = require('./rules.json')
 const fs = require('fs');
 let config = require('./config.json');
 
 const markedpurgestarts = new Map();
+
+// walks backward from the channel head in pages of 100 until both range endpoints are found or the cap is hit
+async function fetchRangeMessages(channel, startId, endId) {
+    const collected = [];
+    let before = undefined;
+    let startFound = false, endFound = false;
+    const maxPages = 10; // 1000 messages back, enough for any legitimate range purge
+
+    for (let page = 0; page < maxPages; page++) {
+        const batch = await channel.messages.fetch({ limit: 100, before });
+        if (batch.size === 0) break;
+        collected.push(...batch.values());
+        startFound = collected.some(m => m.id === startId);
+        endFound = collected.some(m => m.id === endId);
+        if (startFound && endFound) break;
+        before = batch.last().id;
+    }
+
+    return { messages: collected, startFound, endFound };
+}
 
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`ready - logged in as ${readyClient.user.tag}`);
@@ -242,6 +269,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await targetChannel.send(notice).catch(() => null);
             return interaction.editReply(`channel <#${targetChannel.id}> ${isLocking ? 'locked' : 'unlocked'}.`);
         }
+
+        if (commandName === 'history') {
+            if (!isMod) {
+                return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
+            }
+            if (!supabase) {
+                return interaction.reply({ content: 'infraction history isn\'t configured on this instance.', ephemeral: true });
+            }
+
+            const targetUser = options.getUser('user');
+            await interaction.deferReply({ ephemeral: true });
+
+            const { data, error } = await supabase
+                .from('infractions')
+                .select('*')
+                .eq('guild_id', guildId)
+                .eq('target_user_id', targetUser.id)
+                .order('created_at', { ascending: false })
+                .limit(15);
+
+            if (error) {
+                console.error('infraction history fetch error:', error);
+                return interaction.editReply('failed to fetch history.');
+            }
+
+            if (!data || data.length === 0) {
+                return interaction.editReply(`no recorded infractions for **${targetUser.username}**.`);
+            }
+
+            const lines = data.map(row => {
+                const date = new Date(row.created_at).toLocaleDateString();
+                const rule = row.rule_id ? `\`${row.rule_id}\`` : 'custom';
+                const link = row.message_link ? ` — [context](${row.message_link})` : '';
+                return `• **${date}** — ${rule} by <@${row.moderator_id}>${link}`;
+            });
+
+            return interaction.editReply(`**${data.length} infraction(s) for ${targetUser.username}:**\n${lines.join('\n')}`);
+        }
     }
 
     if (!isMod) {
@@ -267,26 +332,59 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 });
             }
 
-            //   
+            //
             await interaction.deferReply({ ephemeral: true });
 
+            if (!interaction.channel.permissionsFor(interaction.guild.members.me).has(PermissionFlagsBits.ManageMessages)) {
+                markedpurgestarts.delete(user.id);
+                return interaction.editReply('okite is missing **Manage Messages** in this channel, cannot purge.');
+            }
+
             try {
-                const messages = await interaction.channel.messages.fetch({ limit: 100 });
-                const msgArray = Array.from(messages.values()).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-                
+                const { messages: fetched, startFound, endFound } = await fetchRangeMessages(interaction.channel, start.messageId, targetMessage.id);
+
+                if (!startFound || !endFound) {
+                    markedpurgestarts.delete(user.id);
+                    return interaction.editReply("couldn't locate both ends of the range (searched back 1000 messages). purge cancelled.");
+                }
+
+                const msgArray = fetched.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
                 const startIndex = msgArray.findIndex(m => m.id === start.messageId);
                 const endIndex = msgArray.findIndex(m => m.id === targetMessage.id);
-
-                if (startIndex === -1 || endIndex === -1) {
-                    markedpurgestarts.delete(user.id);
-                    return interaction.editReply("messages are too old or not in the last 100 messages.");
-                }
 
                 const minIndex = Math.min(startIndex, endIndex);
                 const maxIndex = Math.max(startIndex, endIndex);
 
                 const toDelete = msgArray.slice(minIndex, maxIndex + 1);
                 const toDeleteIds = toDelete.map(m => m.id);
+
+                if (toDelete.length > 200) {
+                    const confirmRow = new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId('purge_confirm').setLabel(`confirm delete of ${toDelete.length} messages`).setStyle(ButtonStyle.Danger),
+                        new ButtonBuilder().setCustomId('purge_cancel').setLabel('cancel').setStyle(ButtonStyle.Secondary)
+                    );
+
+                    const confirmReply = await interaction.editReply({
+                        content: `this range covers **${toDelete.length}** messages, over the 200 auto-confirm threshold. proceed?`,
+                        components: [confirmRow]
+                    });
+
+                    const confirmation = await confirmReply.awaitMessageComponent({
+                        filter: i => i.user.id === user.id,
+                        time: 30000
+                    }).catch(() => null);
+
+                    if (!confirmation || confirmation.customId === 'purge_cancel') {
+                        markedpurgestarts.delete(user.id);
+                        return interaction.editReply({
+                            content: confirmation ? 'purge cancelled.' : 'confirmation timed out, purge cancelled.',
+                            components: []
+                        });
+                    }
+
+                    await confirmation.update({ content: `purging ${toDelete.length} messages...`, components: [] });
+                }
 
                 // paper trail
                 const header = `purge range executed by: ${user.username} // channel: #${interaction.channel.name} // count: ${toDelete.length}\n---`;
@@ -322,14 +420,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     }
                 }
 
-                await interaction.channel.bulkDelete(toDeleteIds);
+                const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
+                const recent = toDelete.filter(m => m.createdTimestamp > fourteenDaysAgo);
+                const old = toDelete.filter(m => m.createdTimestamp <= fourteenDaysAgo);
+
+                for (let i = 0; i < recent.length; i += 100) {
+                    await interaction.channel.bulkDelete(recent.slice(i, i + 100).map(m => m.id));
+                }
+
+                for (const m of old) {
+                    await m.delete().catch(() => null);
+                    await new Promise(r => setTimeout(r, 1000)); // single-message deletes are rate-limited harder than bulkDelete
+                }
+
                 markedpurgestarts.delete(user.id);  // reset mark
 
-                return interaction.editReply(`purged ${toDeleteIds.length} messages.`);
+                let result = `purged ${toDeleteIds.length} messages.`;
+                if (old.length > 0) result += ` (${old.length} were over 14 days old and deleted individually, slower)`;
+                return interaction.editReply(result);
 
             } catch (error) {
                 console.error(error);
-                return interaction.editReply("failed to purge messages. note: messages must be under 14 days old to bulk delete. [why?](<https://docs.discord.com/developers/resources/message#bulk-delete-messages>)");
+                return interaction.editReply(`failed to purge messages: ${error.message}`);
             }
         }
 
@@ -425,7 +537,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const selectedRule = serverRules.find(r => r.id === selectedValue);
         if (!selectedRule) return interaction.reply({ content: 'rule not found.', ephemeral: true });
 
-        await handleModerationAction(interaction, action, targetUserId, targetMessageId, selectedRule.text);
+        await handleModerationAction(interaction, action, targetUserId, targetMessageId, selectedRule.text, selectedRule.id);
     }
 
     // modal submit handler
@@ -491,12 +603,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const [, action, targetUserId, targetMessageId] = customId.split(':');
         const reason = fields.getTextInputValue('reason');
 
-        await handleModerationAction(interaction, action, targetUserId, targetMessageId, reason);
+        await handleModerationAction(interaction, action, targetUserId, targetMessageId, reason, 'custom');
     }
 });
 
 // helpe
-async function handleModerationAction(interaction, action, targetUserId, targetMessageId, reason) {
+async function handleModerationAction(interaction, action, targetUserId, targetMessageId, reason, ruleId = null) {
     await interaction.deferReply({ ephemeral: true });
 
     const channel = interaction.channel;
@@ -511,6 +623,20 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
 
             // reply & ping author
             await targetMessage.reply(`staff notice for <@${targetMessage.author.id}>:\n${reason}`);
+
+            // infraction record, tied to the cited user, not the mod
+            if (supabase) {
+                const { error } = await supabase.from('infractions').insert({
+                    guild_id: interaction.guildId,
+                    target_user_id: targetMessage.author.id,
+                    moderator_id: interaction.user.id,
+                    rule_id: ruleId,
+                    rule_text_snapshot: reason,
+                    action_type: 'lookup',
+                    message_link: targetMessage.url
+                });
+                if (error) console.error('infraction insert error:', error);
+            }
 
             // log cited message
             const time = targetMessage.createdAt.toLocaleTimeString();
