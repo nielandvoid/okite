@@ -316,10 +316,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs' || c.name === 'mod-logs');
                 }
                 if (logChannel) {
-                    await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+                    const logged = await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+                    if (!logged) {
+                        return interaction.editReply('could not write to the log channel, purge aborted so nothing gets deleted without a paper trail.');
+                    }
                 }
 
-                
                 await interaction.channel.bulkDelete(toDeleteIds);
                 markedpurgestarts.delete(user.id);  // reset mark
 
@@ -464,6 +466,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             await targetMessage.reply(replyText);
+
+            const header = `staff reply by: ${interaction.user.username} // target: ${targetMessage.author.username} // channel: #${interaction.channel.name}\n---`;
+            const log = `${header}\n${replyText}`;
+
+            let logChannelId = config.logChannelId || process.env.LOG_CHANNEL_ID;
+            if (process.env.MONGODB_URI) {
+                const guildConfig = await Guild.findOne({ guildId: interaction.guildId });
+                if (guildConfig && guildConfig.logChannelId) {
+                    logChannelId = guildConfig.logChannelId;
+                }
+            }
+            let logChannel = logChannelId ? interaction.guild.channels.cache.get(logChannelId) : null;
+            if (!logChannel) {
+                logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs' || c.name === 'mod-logs');
+            }
+            if (logChannel) {
+                await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+            }
+
             return interaction.editReply(`reply sent.`);
         }
 
@@ -519,7 +540,10 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
                 logChannel = interaction.guild.channels.cache.find(c => c.name === 'logs' || c.name === 'mod-logs');
             }
             if (logChannel) {
-                await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+                const logged = await logChannel.send(`\`\`\`\n${log.slice(0, 1900)}\n\`\`\``).catch(() => null);
+                if (!logged) {
+                    return interaction.editReply('could not write to the log channel, citation left in place and parent message not deleted.');
+                }
             }
 
             // delete parent message
