@@ -10,7 +10,7 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 
 **Server settings** (per server): log channel IDs, command prefix, auto-purge, autocorrect and rule-required options, time zone, custom rules and command aliases, and which channels are locked.
 
-**Infractions** (per server): the user ID of the person, the user ID of the moderator, the rule cited and its text at the time, the reason, the action type (manual entry, mute, kick, softban or ban), duration and expiry, status, timestamps, and links to any evidence a moderator chose to archive in the server's own log channel.
+**Infractions** (per server): the user ID of the person, the user ID of the moderator, the rule cited and its text at the time, the reason, the action type (manual entry, mute, kick, softban or ban), duration and expiry, status, timestamps, the text of the message a moderator cited (if one was cited), and links to any evidence a moderator chose to archive in the server's own log channel.
 
 **Message index** (7 days): message ID, channel ID, author ID, whether it had attachments, and the time sent. It contains no message text. It exists so a ban transcript can be built from a user's recent messages.
 
@@ -37,7 +37,7 @@ Okite runs on a hosting provider (Render). Infractions and message data are stor
 ## How long data is kept
 
 - Message index: 7 days. Message cache: 72 hours.
-- Infractions: until a moderator deletes them (`/infraction delete`), or until the server's data is deleted.
+- Infractions, including the text of any message cited in them: until a moderator deletes them (`/infraction delete`), or until the server's data is deleted.
 - Server settings: until the server's data is deleted.
 - When Okite is removed from a server, that server's stored data (settings, infractions, message index and cache, pending prompts, snapshots, counters) is deleted after 90 days. Adding Okite back within those 90 days keeps the data. Deletion runs automatically.
 
@@ -59,5 +59,5 @@ If this policy changes, the date at the top will too, be changed. Material chang
 ## Contact
 
 Discord: nielandvoid / 1515614953422192640
-Email: [hey@nielandvoid](mailto:hey@nielandvoid)
+Email: [hey@nielandvoid.com](mailto:hey@nielandvoid.com)
 
