@@ -1,4 +1,4 @@
-# okite
+# Okite
 ![visual](okite_visual.png)
 server-wide moderation stack / toolkit for discord
 
