@@ -34,6 +34,7 @@ http.createServer((req, res) => res.end('okite online')).listen(PORT, () => {
 });
 
 const client = new Client({
+    failIfNotExists: false,
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
@@ -900,8 +901,13 @@ async function runModAction(interaction, kind) {
     setTimeout(() => { botBans.delete(key); botUnbans.delete(key); }, 30000).unref();
     const infraction = await record('softban');
     logInBackground(guild, { title: `member softbanned${infraction ? `: infraction #${infraction.case_number}` : ''}`, kind: 'moderation', color: COLORS.danger, fields: logFields(infraction, 'moderator').filter(f => f.name !== 'duration') });
-    await interaction.editReply(`softbanned **${target.username}**${tag(infraction)}. they can rejoin${supabase ? '; building the transcript of their messages now.' : '.'}`);
-    if (infraction && supabase) {
+    const logReady = Boolean(await getLogChannel(guild, 'citation'));
+    const askNoLog = infraction && supabase && !logReady;
+    await interaction.editReply({
+        content: `softbanned **${target.username}**${tag(infraction)}. they can rejoin${!supabase ? '.' : logReady ? '; building the transcript of their messages now.' : `. ${NO_LOG_CHOICE}`}`,
+        components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : []
+    });
+    if (infraction && supabase && logReady) {
         runBanSnapshot({
             guild, target, infraction, moderatorId: interaction.user.id, deleteAfter: true,
             notify: (text) => interaction.followUp({ content: text, ephemeral: true }).catch(() => null)
@@ -1612,8 +1618,22 @@ async function sweepPendingBans() {
     }
 }
 
+const NO_LOG_NOTE = 'no log channel is set, so no transcript or save prompt was made and their messages stay up. set one with /setlog.';
+const NO_LOG_CHOICE = 'no log channel set - transcription not feasible; leave messages or purge?';
+
+const noLogButtons = (userId, caseNumber) => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`nolog_keep:${userId}:${caseNumber}`).setLabel('Leave').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`nolog_delete:${userId}:${caseNumber}`).setLabel('Purge').setStyle(ButtonStyle.Danger)
+);
+
 // after ban; transcript, attachments prompt
 async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAfter, notify }) {
+    const logChannel = await getLogChannel(guild, 'citation');
+    if (!logChannel) {
+        console.warn(`ban snapshot skipped for infraction #${infraction.case_number}: no log channel in ${guild.id}`);
+        notify?.(NO_LOG_NOTE);
+        return;
+    }
     const refs = await getIndexedRefs(guild.id, target.id);
     if (!refs.length) {
         await sendLog(guild, { title: `ban snapshot: infraction #${infraction.case_number}`, kind: 'citation', color: COLORS.muted, description: `no indexed messages for ${target.username} in the last 7 days.` });
@@ -1646,9 +1666,6 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         if (deleteAfter) await deleteSnapshotMessages(guild, messages);
         return;
     }
-
-    const logChannel = await getLogChannel(guild, 'citation');
-    if (!logChannel) return;
 
     const promptFacts = [`> **Infraction:** \`#${infraction.case_number}\``, `> **User:** ${target.username} (<@${target.id}>)`, `> **Attachments:** ${attachments.length} (${formatSize(totalBytes)})`, `> **Transcript:** already logged`, `> **Copied so far:** nothing`, `> **Validity:** ${BAN_PROMPT_HOURS}h`].join('\n');
     const promptFiles = clip(attachments.map(describeAttachment).join('\n'), 1200);
@@ -2445,13 +2462,15 @@ async function handleInteraction(interaction) {
             });
             const timed = banDuration && !banDuration.permanent;
 
-            await interaction.editReply(
+            const logReady = Boolean(await getLogChannel(interaction.guild, 'citation'));
+            const askNoLog = !urgent && infraction && supabase && !logReady;
+            await interaction.editReply({ components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : [], content:
                 `banned **${target.username}**${timed ? ` for ${banDuration.label}` : ''}${infraction ? ` (infraction #${infraction.case_number})` : ''}.` +
                 (timed && timedColumnsMissing() ? ' the database is missing the duration columns (run db/infractions_duration.sql), so this ban will not lift itself.' : '') +
                 (urgent
                     ? ' their last 7 days of messages were deleted immediately and nothing was saved. if this was illegal content, report it with Discord\'s Report Message and to your national hotline.'
-                    : (supabase ? ' building the transcript now.' : ' (no database configured, so no transcript or snapshot.)'))
-            );
+                    : (!supabase ? ' (no database configured, so no transcript or snapshot.)' : logReady ? ' building the transcript now.' : ` ${NO_LOG_CHOICE}`))
+            });
 
             logInBackground(interaction.guild, {
                 title: infraction ? `${urgent ? 'urgent ban' : 'member banned'}: infraction #${infraction.case_number}` : (urgent ? 'urgent ban' : 'member banned'),
@@ -2466,7 +2485,7 @@ async function handleInteraction(interaction) {
                 ]
             });
 
-            if (!urgent && infraction && supabase) {
+            if (!urgent && infraction && supabase && logReady) {
                 runBanSnapshot({
                     guild: interaction.guild,
                     target,
@@ -2754,6 +2773,18 @@ async function handleInteraction(interaction) {
 
     if (interaction.isButton() && interaction.customId.startsWith('rulepage:')) {
         return interaction.update(renderRuleList(await getServerRules(interaction.guildId), Number.parseInt(interaction.customId.split(':')[1], 10) || 0, await guildLook(interaction.guild)));
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('nolog_')) {
+        const [action, userId, caseNumber] = interaction.customId.split(':');
+        if (action === 'nolog_keep') {
+            return interaction.update({ content: `left their messages in place (infraction #${caseNumber}), decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
+        }
+        await interaction.deferUpdate();
+        const { messages } = await fetchSnapshot(interaction.guild, await getIndexedRefs(interaction.guildId, userId));
+        if (messages.length) await deleteSnapshotMessages(interaction.guild, messages);
+        console.log(`purged ${messages.length} message(s) for infraction #${caseNumber} with no transcript, decided by ${interaction.user.id}`);
+        return interaction.editReply({ content: `${messages.length} message(s) purged without a transcript (infraction #${caseNumber}), decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('ban_')) {
