@@ -1,5 +1,6 @@
 # okite
-context-menu rule citation & range purge utility for r/BTechtards Discord
+![visual](okite_visual.png)
+server-wide moderation stack / toolkit for discord
 
 built with node and discord.js.
 
@@ -119,3 +120,5 @@ the Server Members and Message Content intents are privileged: Discord can lock 
 
 ## license
 mit
+
+[privacy](privacy.md)
