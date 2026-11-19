@@ -33,18 +33,17 @@ http.createServer((req, res) => res.end('okite online')).listen(PORT, () => {
     console.log(`http server listening on port ${PORT}`);
 });
 
-const client = new Client({
-    failIfNotExists: false,
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildModeration,
-        GatewayIntentBits.GuildVoiceStates
-    ],
-    partials: [Partials.Message, Partials.Channel]
-});
+const FULL_INTENTS = [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates
+];
+const LIMITED_INTENTS = FULL_INTENTS.filter(i => i !== GatewayIntentBits.GuildMembers && i !== GatewayIntentBits.MessageContent);
+const clientOptions = { failIfNotExists: false, partials: [Partials.Message, Partials.Channel] };
+let client = new Client({ ...clientOptions, intents: FULL_INTENTS });
 
 const mongoose = require('mongoose');
 const Guild = require('./models/guild');
@@ -915,6 +914,54 @@ async function runModAction(interaction, kind) {
     }
 }
 
+const REMOVED_GUILD_GRACE_MS = 90 * 24 * 3600e3;
+const GUILD_TABLES = ['infractions', 'message_index', 'message_cache', 'pending_bans', 'guild_snapshots'];
+
+async function markGuildRemoved(guildId) {
+    const { error } = await supabase.from('bot_state').upsert({ key: `guild_left:${guildId}`, value: { at: new Date().toISOString() }, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) console.error('guild removal mark error:', error.message);
+}
+
+async function clearGuildRemoved(guildId) {
+    await supabase.from('bot_state').delete().eq('key', `guild_left:${guildId}`);
+}
+
+async function deleteGuildData(guildId) {
+    for (const buffer of [indexBuffer, cacheBuffer]) {
+        for (let i = buffer.length - 1; i >= 0; i--) if (buffer[i].guild_id === guildId) buffer.splice(i, 1);
+    }
+    for (const table of GUILD_TABLES) {
+        const { error } = await supabase.from(table).delete().eq('guild_id', guildId);
+        if (error) throw new Error(`${table}: ${error.message}`);
+    }
+    await supabase.from('bot_state').delete().eq('key', `case_floor:${guildId}`);
+    if (process.env.MONGODB_URI) await Guild.deleteOne({ guildId });
+    guildConfigCache.delete(guildId);
+}
+
+async function sweepRemovedGuilds() {
+    if (!supabase || !client.isReady() || client.guilds.cache.size === 0) return;
+    const { data: known } = await supabase.from('guild_snapshots').select('guild_id');
+    const { data: marks } = await supabase.from('bot_state').select('key, value').like('key', 'guild_left:%');
+    const left = new Map((marks || []).map(m => [m.key.slice('guild_left:'.length), m.value?.at]));
+    for (const { guild_id } of known || []) {
+        if (client.guilds.cache.has(guild_id) || left.has(guild_id)) continue;
+        await markGuildRemoved(guild_id);
+        left.set(guild_id, new Date().toISOString());
+    }
+    for (const [guildId, at] of left) {
+        if (client.guilds.cache.has(guildId)) { await clearGuildRemoved(guildId); continue; }
+        if (Date.now() - new Date(at).getTime() < REMOVED_GUILD_GRACE_MS) continue;
+        try {
+            await deleteGuildData(guildId);
+            await clearGuildRemoved(guildId);
+            console.log(`deleted stored data for guild ${guildId} (removed more than 90 days ago)`);
+        } catch (err) {
+            console.error(`guild data deletion error for ${guildId}:`, err.message);
+        }
+    }
+}
+
 const muteRenewedAt = new Map();
 // expiry sweep; unban, end mute, renew mute > 28d
 async function sweepTimedPunishments() {
@@ -1730,6 +1777,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 setInterval(pruneIndex, 60 * 60 * 1000).unref();
 setInterval(() => sweepPendingBans().catch(err => console.error(err)), 60 * 1000).unref();
+setInterval(() => sweepRemovedGuilds().catch(err => console.error('removed guild sweep error:', err.message)), 60 * 60 * 1000).unref();
 setInterval(() => sweepTimedPunishments().catch(err => console.error('timed punishment sweep error:', err)), 60 * 1000).unref();
 
 async function resolveEvidence(guild, entries) {
@@ -1926,6 +1974,7 @@ client.once(Events.ClientReady, (readyClient) => {
     sweepPendingBans().catch(err => console.error(err));
     sweepTimedPunishments().catch(err => console.error('timed punishment sweep error:', err));
     runCatchUp().catch(err => console.error('catch-up error:', err));
+    sweepRemovedGuilds().catch(err => console.error('removed guild sweep error:', err.message));
 });
 
 async function handleAutocomplete(interaction) {
@@ -4219,6 +4268,14 @@ client.on(Events.MessageUpdate, safe(async (oldMessage, newMessage) => {
     });
 }));
 
+client.on(Events.GuildDelete, safe(async (guild) => {
+    if (supabase && guild.available !== false) await markGuildRemoved(guild.id);
+}));
+
+client.on(Events.GuildCreate, safe(async (guild) => {
+    if (supabase) await clearGuildRemoved(guild.id);
+}));
+
 client.on(Events.GuildMemberAdd, safe(async (member) => {
     reapplyMutes(member).catch(err => console.error('mute reapply error:', err.message));
     const ageDays = Math.floor((Date.now() - member.user.createdTimestamp) / 86400000);
@@ -4457,4 +4514,16 @@ client.on(Events.VoiceStateUpdate, safe(async (oldState, newState) => {
     });
 }));
 
-client.login(process.env.DISCORD_TOKEN);
+async function login() {
+    try {
+        await client.login(process.env.DISCORD_TOKEN);
+    } catch (err) {
+        if (!/disallowed intents/i.test(err.message)) throw err;
+        const limited = new Client({ ...clientOptions, intents: LIMITED_INTENTS });
+        for (const event of client.eventNames()) for (const listener of client.listeners(event)) limited.on(event, listener);
+        client = limited;
+        console.warn('reduced mode: discord has not approved the Server Members and Message Content intents for this app, so prefix commands, message text in logs and join / leave logs are off. slash commands and context menus still work.');
+        await client.login(process.env.DISCORD_TOKEN);
+    }
+}
+login().catch(err => { console.error('login failed:', err.message); process.exit(1); });

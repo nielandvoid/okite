@@ -68,6 +68,9 @@ everything goes to the log channel as embeds (purge transcripts are attached as 
 
 the event logs need the **Server Members** and **Message Content** privileged intents enabled in the developer portal. the bot also needs **View Audit Log** to name who performed a deletion, kick, ban etc.
 
+## reduced mode
+the Server Members and Message Content intents are privileged: Discord can lock them for an app until it passes review. if Discord refuses them (`Used disallowed intents`), okite logs `reduced mode` and logs in again without them instead of staying offline. slash commands and context menus keep working (`/ban`, `/kick`, `/mute`, `/infraction`, `/rule`, `/lock`, `lookup`, mark / purge range, reply). prefix commands (`!ban`, `!purge` ...), message text in the logs and join / leave / role / nickname logs are off until the intents are approved.
+
 ## prerequisites
 * **node.js** (v18.x or higher recommended)
 * a discord bot token & client id
