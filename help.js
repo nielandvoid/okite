@@ -101,6 +101,12 @@ module.exports = {
         desc: 'makes a rule compulsory.\nwhen on, `ban`, `kick`, `softban`, `mute` and `infraction add` need a rule id, or `custom` with a reason. when off (the default), the rule is optional and none is recorded as custom. per server.',
         perm: 'Manage Channels'
     },
+    messagelogs: {
+        summary: 'turn message edit / delete logs and ban transcripts on or off',
+        syntax: 'messagelogs\nmessagelogs on|off',
+        desc: 'turns message logging on for this server. it is **off by default**.\nwhen on, okite keeps a 72 hour copy of messages so edits and deletes can be logged with their text, and indexes message ids for ban transcripts. when off, nothing is stored, edits and deletes are not logged, and a ban has no transcript. per server.',
+        perm: 'Manage Channels'
+    },
     timezone: {
         summary: 'set the time zone the bot uses for this server',
         syntax: 'timezone\ntimezone <zone>\ntimezone reset',

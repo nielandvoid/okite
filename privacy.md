@@ -6,6 +6,8 @@ Okite is a Discord moderation bot. Server admins add it to their own server, con
 
 ## What Okite stores
 
+Message logging is **off by default** and is turned on per server by an admin with `/messagelogs`. While it is off, the message index and the message cache described below are not collected for that server, edits and deletes are not logged, and a ban makes no transcript. Everything else below (settings, infractions and the rest) is stored regardless.
+
 Okite only reads what Discord sends to bots in servers it has been added to. It does not read direct messages and it does not use presence data.
 
 **Server settings** (per server): log channel IDs, command prefix, auto-purge, autocorrect and rule-required options, time zone, custom rules and command aliases, and which channels are locked.
@@ -36,7 +38,7 @@ Okite runs on a hosting provider (Render). Infractions and message data are stor
 
 ## How long data is kept
 
-- Message index: 7 days. Message cache: 72 hours.
+- Message index: 7 days. Message cache: 72 hours. Both only while an admin has message logs turned on for that server.
 - Infractions, including the text of any message cited in them: until a moderator deletes them (`/infraction delete`), or until the server's data is deleted.
 - Server settings: until the server's data is deleted.
 - When Okite is removed from a server, that server's stored data (settings, infractions, message index and cache, pending prompts, snapshots, counters) is deleted after 90 days. Adding Okite back within those 90 days keeps the data. Deletion runs automatically.

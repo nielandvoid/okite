@@ -91,6 +91,12 @@ const commands = [
         .addBooleanOption(o => o.setName("enabled").setDescription("on: a rule is needed for every action (no option shows the state)")),
 
     new SlashCommandBuilder()
+        .setName("messagelogs")
+        .setDescription(help.messagelogs.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addBooleanOption(o => o.setName("enabled").setDescription("on: log edited and deleted messages and build ban transcripts (no option shows the state)")),
+
+    new SlashCommandBuilder()
         .setName("alias")
         .setDescription(help.alias.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)

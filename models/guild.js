@@ -25,6 +25,7 @@ const guildSchema = new mongoose.Schema({
     autoPurgeParent: { type: Boolean, default: true },
     autoCorrect: { type: Boolean, default: false },
     requireRule: { type: Boolean, default: false },
+    messageLogs: { type: Boolean, default: false },
     timezone: { type: String, default: null },
     citationChannelId: { type: String, default: null },
     purgeChannelId: { type: String, default: null },

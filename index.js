@@ -900,10 +900,11 @@ async function runModAction(interaction, kind) {
     setTimeout(() => { botBans.delete(key); botUnbans.delete(key); }, 30000).unref();
     const infraction = await record('softban');
     logInBackground(guild, { title: `member softbanned${infraction ? `: infraction #${infraction.case_number}` : ''}`, kind: 'moderation', color: COLORS.danger, fields: logFields(infraction, 'moderator').filter(f => f.name !== 'duration') });
-    const logReady = Boolean(await getLogChannel(guild, 'citation'));
-    const askNoLog = infraction && supabase && !logReady;
+    const logsOn = await messageLogsOn(guild.id);
+    const logReady = logsOn && Boolean(await getLogChannel(guild, 'citation'));
+    const askNoLog = infraction && supabase && logsOn && !logReady;
     await interaction.editReply({
-        content: `softbanned **${target.username}**${tag(infraction)}. they can rejoin${!supabase ? '.' : logReady ? '; building the transcript of their messages now.' : `. ${NO_LOG_CHOICE}`}`,
+        content: `softbanned **${target.username}**${tag(infraction)}. they can rejoin${!supabase ? '.' : !logsOn ? `. ${NO_LOGS_NOTE}` : logReady ? '; building the transcript of their messages now.' : `. ${NO_LOG_CHOICE}`}`,
         components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : []
     });
     if (infraction && supabase && logReady) {
@@ -1666,6 +1667,7 @@ async function sweepPendingBans() {
 }
 
 const NO_LOG_NOTE = 'no log channel is set, so no transcript or save prompt was made and their messages stay up. set one with /setlog.';
+const NO_LOGS_NOTE = 'message logs are off for this server, so no transcript was made and their messages stay up. turn them on with /messagelogs.';
 const NO_LOG_CHOICE = 'no log channel set - transcription not feasible; leave messages or purge?';
 
 const noLogButtons = (userId, caseNumber) => new ActionRowBuilder().addComponents(
@@ -1675,6 +1677,10 @@ const noLogButtons = (userId, caseNumber) => new ActionRowBuilder().addComponent
 
 // after ban; transcript, attachments prompt
 async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAfter, notify }) {
+    if (!(await messageLogsOn(guild.id))) {
+        notify?.(NO_LOGS_NOTE);
+        return;
+    }
     const logChannel = await getLogChannel(guild, 'citation');
     if (!logChannel) {
         console.warn(`ban snapshot skipped for infraction #${infraction.case_number}: no log channel in ${guild.id}`);
@@ -2034,7 +2040,7 @@ async function handleInteraction(interaction) {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
 
-        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'timezone', 'alias', 'rule', 'lock', 'unlock'].includes(commandName) && !isManager) {
+        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'timezone', 'alias', 'rule', 'lock', 'unlock'].includes(commandName) && !isManager) {
             return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
 
@@ -2115,6 +2121,26 @@ async function handleInteraction(interaction) {
             const replied = interaction.reply({ content: `requiring a rule is now **${wanted ? 'on' : 'off'}**.`, ephemeral: true });
             logInBackground(interaction.guild, {
                 title: 'rule requirement changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current ? 'on' : 'off', inline: true },
+                    { name: 'now', value: wanted ? 'on' : 'off', inline: true }
+                ]
+            });
+            return replied;
+        }
+
+        if (commandName === 'messagelogs') {
+            const wanted = options.getBoolean('enabled');
+            const current = (await getAutoPurge(guildId)).messageLogs;
+            if (wanted === null || wanted === undefined) {
+                return interaction.reply({ content: `message logs are **${current ? 'on' : 'off'}**. when on, okite keeps a 72 hour copy of messages so edits and deletes are logged with their text, and ban transcripts are built; when off (the default) nothing is stored and none of that happens.`, ephemeral: true });
+            }
+            await setAutoPurge(guildId, 'messagelogs', wanted);
+            const replied = interaction.reply({ content: `message logs are now **${wanted ? 'on' : 'off'}**.${wanted ? '' : ' messages already stored are removed within 72 hours.'}`, ephemeral: true });
+            logInBackground(interaction.guild, {
+                title: 'message logs changed',
                 kind: 'server',
                 fields: [
                     { name: 'moderator', value: who(interaction.user), inline: true },
@@ -2511,14 +2537,15 @@ async function handleInteraction(interaction) {
             });
             const timed = banDuration && !banDuration.permanent;
 
-            const logReady = Boolean(await getLogChannel(interaction.guild, 'citation'));
-            const askNoLog = !urgent && infraction && supabase && !logReady;
+            const logsOn = await messageLogsOn(interaction.guildId);
+            const logReady = logsOn && Boolean(await getLogChannel(interaction.guild, 'citation'));
+            const askNoLog = !urgent && infraction && supabase && logsOn && !logReady;
             await interaction.editReply({ components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : [], content:
                 `banned **${target.username}**${timed ? ` for ${banDuration.label}` : ''}${infraction ? ` (infraction #${infraction.case_number})` : ''}.` +
                 (timed && timedColumnsMissing() ? ' the database is missing the duration columns (run db/infractions_duration.sql), so this ban will not lift itself.' : '') +
                 (urgent
                     ? ' their last 7 days of messages were deleted immediately and nothing was saved. if this was illegal content, report it with Discord\'s Report Message and to your national hotline.'
-                    : (!supabase ? ' (no database configured, so no transcript or snapshot.)' : logReady ? ' building the transcript now.' : ` ${NO_LOG_CHOICE}`))
+                    : (!supabase ? ' (no database configured, so no transcript or snapshot.)' : !logsOn ? ` ${NO_LOGS_NOTE}` : logReady ? ' building the transcript now.' : ` ${NO_LOG_CHOICE}`))
             });
 
             logInBackground(interaction.guild, {
@@ -3175,7 +3202,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute',
-    setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', timezone: 'timezone', tz: 'timezone',
+    setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', timezone: 'timezone', tz: 'timezone',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
 };
@@ -3193,7 +3220,7 @@ const prefixCache = new Map();
 const HELP_GROUPS = [
     ['moderation', ['ban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'cite', 'lock', 'unlock']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'timezone', 'rule']],
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'timezone', 'rule']],
     ['utility', ['ping', 'help']]
 ];
 const COMMAND_HELP = require('./help');
@@ -3316,17 +3343,17 @@ const autoPurgeCache = new Map();
 
 async function getAutoPurge(guildId) {
     if (autoPurgeCache.has(guildId)) return autoPurgeCache.get(guildId);
-    let settings = { commands: !!config.autoPurge, parent: config.autoPurgeParent !== false, correct: !!config.autoCorrect, requireRule: !!config.requireRule, timezone: config.timezone || null };
+    let settings = { commands: !!config.autoPurge, parent: config.autoPurgeParent !== false, correct: !!config.autoCorrect, requireRule: !!config.requireRule, messageLogs: !!config.messageLogs, timezone: config.timezone || null };
     if (process.env.MONGODB_URI) {
         const doc = await Guild.findOne({ guildId }).lean().catch(() => null);
-        if (doc) settings = { commands: !!doc.autoPurge, parent: doc.autoPurgeParent !== false, correct: !!doc.autoCorrect, requireRule: !!doc.requireRule, timezone: doc.timezone || null };
+        if (doc) settings = { commands: !!doc.autoPurge, parent: doc.autoPurgeParent !== false, correct: !!doc.autoCorrect, requireRule: !!doc.requireRule, messageLogs: !!doc.messageLogs, timezone: doc.timezone || null };
     }
     autoPurgeCache.set(guildId, settings);
     return settings;
 }
 
 async function setAutoPurge(guildId, target, enabled) {
-    const key = target === 'parent' ? 'autoPurgeParent' : target === 'correct' ? 'autoCorrect' : target === 'rule' ? 'requireRule' : target === 'timezone' ? 'timezone' : 'autoPurge';
+    const key = target === 'parent' ? 'autoPurgeParent' : target === 'correct' ? 'autoCorrect' : target === 'rule' ? 'requireRule' : target === 'messagelogs' ? 'messageLogs' : target === 'timezone' ? 'timezone' : 'autoPurge';
     if (process.env.MONGODB_URI) {
         await Guild.findOneAndUpdate({ guildId }, { [key]: enabled }, { upsert: true, new: true });
     } else {
@@ -3336,6 +3363,8 @@ async function setAutoPurge(guildId, target, enabled) {
     autoPurgeCache.delete(guildId);
     if (!process.env.MONGODB_URI) autoPurgeCache.clear();
 }
+
+const messageLogsOn = async (guildId) => (await getAutoPurge(guildId)).messageLogs;
 
 async function getPrefix(guildId) {
     if (prefixCache.has(guildId)) return prefixCache.get(guildId);
@@ -3520,6 +3549,14 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         return { commandName: 'timezone', subcommand, values };
     }
 
+    if (name === 'messagelogs') {
+        const state = sub(args[0], { ...ON_OFF, show: 'show' });
+        if (state.error) return fail(state.error);
+        if (state.value === 'on' || state.value === 'off') values.enabled = state.value === 'on';
+        else if (state.value !== undefined && state.value !== 'show') return fail(`syntax: \`${PREFIX}messagelogs\` to show, or \`${PREFIX}messagelogs on|off\``);
+        return { commandName: 'messagelogs', subcommand, values };
+    }
+
     if (name === 'requirerule') {
         const state = sub(args[0], { ...ON_OFF, show: 'show' });
         if (state.error) return fail(state.error);
@@ -3665,7 +3702,7 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'infraction') return ['view', 'user', 'moderator', 'recent'].includes(subcommand);
     if (commandName === 'rule' || commandName === 'alias') return subcommand === 'list';
     if (commandName === 'prefix') return !subcommand || subcommand === 'show';
-    if (commandName === 'autopurge' || commandName === 'autocorrect' || commandName === 'requirerule') return values.enabled === undefined || values.enabled === null;
+    if (commandName === 'autopurge' || commandName === 'autocorrect' || commandName === 'requirerule' || commandName === 'messagelogs') return values.enabled === undefined || values.enabled === null;
     if (commandName === 'timezone') return !values.zone;
     return false;
 }
@@ -4024,6 +4061,7 @@ function diffMessages(rows, scan, since) {
 
 async function catchUpMessages(guild, since, budget) {
     const result = { deleted: [], edited: [], backfilled: 0, unverifiable: 0, channels: 0 };
+    if (!(await messageLogsOn(guild.id))) return result;
     const rows = await loadRecentCacheRows(guild.id);
     const byChannel = new Map();
     rows.forEach(r => byChannel.set(r.channel_id, [...(byChannel.get(r.channel_id) || []), r]));
@@ -4183,6 +4221,7 @@ client.on(Events.MessageDelete, safe(async (message) => {
     const forget = () => forgetCachedMessages(message.guildId, [message.id]);
     if (suppressedDeletes.delete(message.id)) return forget();
     if (message.author?.bot) return forget();
+    if (!(await messageLogsOn(message.guildId))) return;
 
     const stored = (!message.author || message.partial || message.content == null) ? await lookupCachedMessage(message.guildId, message.id).catch(() => null) : null;
     const author = message.author ?? (stored ? { id: stored.author_id, username: stored.author_name } : null);
@@ -4221,6 +4260,7 @@ client.on(Events.MessageBulkDelete, safe(async (messages, channel) => {
     const allIds = [...messages.values()].map(m => m.id);
     const unsuppressed = messages.filter(m => !suppressedDeletes.delete(m.id));
     if (unsuppressed.size === 0) return forgetCachedMessages(channel.guild.id, allIds);
+    if (!(await messageLogsOn(channel.guild.id))) return;
 
     const uncached = [...unsuppressed.values()].filter(m => !m.author || m.content == null).map(m => m.id);
     const stored = uncached.length ? await lookupCachedMessages(channel.guild.id, uncached).catch(() => new Map()) : new Map();
@@ -4247,6 +4287,7 @@ client.on(Events.MessageBulkDelete, safe(async (messages, channel) => {
 client.on(Events.MessageUpdate, safe(async (oldMessage, newMessage) => {
     if (!newMessage.guild || newMessage.author?.bot) return;
     if (oldMessage.content === newMessage.content) return;
+    if (!(await messageLogsOn(newMessage.guildId))) return;
 
     const stored = (oldMessage.content == null || !newMessage.author) ? await lookupCachedMessage(newMessage.guildId, newMessage.id).catch(() => null) : null;
     const author = newMessage.author ?? (stored ? { id: stored.author_id, username: stored.author_name } : null);
@@ -4310,8 +4351,10 @@ client.on(Events.GuildMemberRemove, safe(async (member) => {
 
 client.on(Events.MessageCreate, safe(async (message) => {
     if (!message.guild || message.author?.bot) return;
-    indexMessage(message);
-    cacheMessage(message);
+    if (await messageLogsOn(message.guildId)) {
+        indexMessage(message);
+        cacheMessage(message);
+    }
     if (!process.env.TRACE_PREFIX) return handlePrefixMessage(message);
     const received = Date.now();
     await handlePrefixMessage(message);
