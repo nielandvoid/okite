@@ -6,8 +6,10 @@ const { createClient } = require('@supabase/supabase-js');
 
 const guildId = process.argv[2];
 const confirmed = process.argv.includes('--yes');
+const fileArg = process.argv.find(a => a.startsWith('--file='));
+const exportFile = path.join(__dirname, 'exports', fileArg ? fileArg.slice(7) : 'cases.json');
 if (!/^\d{15,25}$/.test(guildId || '')) {
-    console.error('usage: node import-sapphire.js <guild id> [--yes]');
+    console.error('usage: node import-sapphire.js <guild id> [--file=name] [--yes]');
     process.exit(1);
 }
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -32,7 +34,10 @@ function parseDuration(text) {
 }
 
 (async () => {
-    const { cases } = JSON.parse(fs.readFileSync(path.join(__dirname, 'exports', 'cases.json'), 'utf8'));
+    const raw = fs.readFileSync(exportFile, 'utf8');
+    const cases = exportFile.endsWith('.ndjson')
+        ? raw.split('\n').filter(Boolean).map(l => JSON.parse(l))
+        : JSON.parse(raw).cases;
     const rows = [];
     const skipped = [];
     for (const c of cases) {
@@ -40,6 +45,8 @@ function parseDuration(text) {
         const target = c.user?.id || c.list?.userId;
         if (!created || !target || !ACTIONS[c.type]) { skipped.push(c.id); continue; }
         const reason = (c.reason || c.list?.reason || '').trim();
+        const proof = (c.proof || '').trim();
+        const evidence = [...new Set(proof.match(/https?:\/\/[^\s<>)\]]+/g) || [])];
         rows.push({
             guild_id: guildId,
             target_user_id: target,
@@ -50,7 +57,8 @@ function parseDuration(text) {
             duration: parseDuration(c.duration || c.list?.duration),
             ended_at: created.toISOString(),
             action_type: ACTIONS[c.type],
-            message_content: c.proof || null,
+            message_content: proof && proof !== '/' ? proof : null,
+            evidence_urls: evidence,
             status: c.state === 'Closed' ? 'voided' : 'active',
             voided_by: c.state === 'Closed' ? 'sapphire' : null,
             void_reason: c.state === 'Closed' ? 'closed in Sapphire' : null,

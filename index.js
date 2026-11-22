@@ -48,6 +48,7 @@ let client = new Client({ ...clientOptions, intents: FULL_INTENTS });
 
 const mongoose = require('mongoose');
 const Guild = require('./models/guild');
+const { auditGuild, reportText } = require('./audit');
 
 if (process.env.MONGODB_URI) {
     mongoose.connect(process.env.MONGODB_URI)
@@ -151,9 +152,62 @@ const AVATAR_FIELDS = ['user', 'author', 'cited user', 'target', 'replied to'];
 
 const cut = (text, n) => (text.length > n ? text.slice(0, n - 1) + '…' : text);
 
-function codeBlock(text) {
-    return ['```', ...text.replace(/```/g, '`\u200b``').split('\n'), '```'].map(l => `> ${l}`).join('\n');
+function codeBlock(text, lang = '') {
+    return [`\`\`\`${lang}`, ...text.replace(/```/g, '`\u200b``').split('\n'), '```'].map(l => `> ${l}`).join('\n');
 }
+
+const ANSI_RED = '\u001b[0;31m';
+const ANSI_YELLOW = '\u001b[0;33m';
+const ANSI_GREEN = '\u001b[0;32m';
+const ANSI_RESET = '\u001b[0m';
+const stripEscapes = (text) => String(text).replace(/\u001b/g, '');
+const paintRed = (text) => `${ANSI_RED}${stripEscapes(text)}${ANSI_RESET}`;
+
+function diffSides(before, after) {
+    const a = (stripEscapes(before).match(/\s+|\S+/g) || []).map(t => ({ t, changed: false }));
+    const b = (stripEscapes(after).match(/\s+|\S+/g) || []).map(t => ({ t, changed: false }));
+    let head = 0;
+    while (head < a.length && head < b.length && a[head].t === b[head].t) head++;
+    let tail = 0;
+    while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail].t === b[b.length - 1 - tail].t) tail++;
+    const midA = a.slice(head, a.length - tail);
+    const midB = b.slice(head, b.length - tail);
+    const keptA = new Set();
+    const keptB = new Set();
+    if (midA.length && midB.length && midA.length * midB.length <= 90000) {
+        const w = midB.length + 1;
+        const table = new Uint16Array((midA.length + 1) * w);
+        for (let i = midA.length - 1; i >= 0; i--) {
+            for (let j = midB.length - 1; j >= 0; j--) {
+                table[i * w + j] = midA[i].t === midB[j].t ? table[(i + 1) * w + j + 1] + 1 : Math.max(table[(i + 1) * w + j], table[i * w + j + 1]);
+            }
+        }
+        let i = 0, j = 0;
+        while (i < midA.length && j < midB.length) {
+            if (midA[i].t === midB[j].t) { keptA.add(midA[i]); keptB.add(midB[j]); i++; j++; }
+            else if (table[(i + 1) * w + j] >= table[i * w + j + 1]) i++;
+            else j++;
+        }
+    }
+    midA.forEach(tok => { tok.changed = !keptA.has(tok); });
+    midB.forEach(tok => { tok.changed = !keptB.has(tok); });
+    return { a, b };
+}
+
+function paintTokens(tokens, color) {
+    let out = '';
+    let open = false;
+    for (const { t, changed } of tokens) {
+        const mark = changed && /\S/.test(t);
+        if (mark && !open) { out += color; open = true; }
+        else if (!mark && open && /\S/.test(t)) { out += ANSI_RESET; open = false; }
+        out += t;
+    }
+    return open ? out + ANSI_RESET : out;
+}
+
+const paintRemoved = (text, after) => paintTokens(diffSides(text, after).a, ANSI_YELLOW);
+const paintAdded = (text, before) => paintTokens(diffSides(before, text).b, ANSI_GREEN);
 
 const ISO_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
 const prettyTimes = (text) => String(text).replace(ISO_TIME, (iso) => `<t:${Math.floor(Date.parse(iso) / 1000)}:f>`);
@@ -162,7 +216,7 @@ function renderLogEmbed({ title, color = COLORS.info, description, fields = [], 
     const valid = fields.filter(f => f && f.value !== undefined && f.value !== null && f.value !== '');
     const isShort = (f) => !f.code && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
-    const sections = valid.filter(f => !isShort(f)).map(f => `**${sentenceCase(String(f.name))}**\n${f.code ? codeBlock(cut(String(f.value), 1500)) : (f.quote ? String(f.value).slice(0, 1000).split('\n').map(l => `> ${l}`).join('\n') : String(f.value).slice(0, 1000))}`);
+    const sections = valid.filter(f => !isShort(f)).map(f => `**${sentenceCase(String(f.name))}**\n${f.code ? (f.paint ? codeBlock(f.paint(cut(String(f.value), 1500)), 'ansi') : codeBlock(cut(String(f.value), 1500))) : (f.quote ? String(f.value).slice(0, 1000).split('\n').map(l => `> ${l}`).join('\n') : String(f.value).slice(0, 1000))}`);
     let body = [description, quoted.join('\n'), ...sections].filter(Boolean).join('\n\n').slice(0, 4000);
     const padding = Number(process.env.EMBED_PAD_WIDTH) || 0;
     if (padding > 0) body += `\n${'\u2800'.repeat(Math.min(padding, 200))}`;
@@ -214,7 +268,7 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     const isMain = (f) => f.code || (String(f.name).toLowerCase() === 'reason' && !PLACEHOLDER_REASONS.has(String(f.value).toLowerCase()));
     const isShort = (f) => !isMain(f) && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
-    const sections = valid.filter(f => !isShort(f)).map(f => ({ label: sentenceCase(String(f.name)), value: String(f.value), code: isMain(f), quote: !!f.quote }));
+    const sections = valid.filter(f => !isShort(f)).map(f => ({ label: sentenceCase(String(f.name)), value: String(f.value), code: isMain(f), quote: !!f.quote, paint: f.paint }));
 
     const person = valid.find(f => AVATAR_FIELDS.includes(String(f.name).toLowerCase()) && /<@!?(\d+)>/.test(String(f.value)));
     const id = person && String(person.value).match(/<@!?(\d+)>/)[1];
@@ -230,7 +284,7 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     const footer = `-# ${by}<t:${Math.floor(Date.now() / 1000)}:f>`;
 
     const head = [`## ${sentenceCase(title).slice(0, 200)}`, description, quoted.join('\n')].filter(Boolean).join('\n');
-    const render = (sec) => (sec.code ? `**${sec.label}**\n${codeBlock(sec.text)}` : `**${sec.label}**\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
+    const render = (sec) => (sec.code ? `**${sec.label}**\n${sec.paint ? codeBlock(sec.paint(sec.text), 'ansi') : codeBlock(sec.text)}` : `**${sec.label}**\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
     const parts = sections.map(sec => ({ ...sec, text: sec.value }));
     const total = (h) => h.length + footer.length + parts.reduce((n, p) => n + render(p).length, 0);
     let headText = head;
@@ -945,7 +999,7 @@ async function runModAction(interaction, kind) {
     if (infraction && supabase && logReady) {
         runBanSnapshot({
             guild, target, infraction, moderatorId: interaction.user.id, deleteAfter: true,
-            notify: (text) => interaction.followUp({ content: text, ephemeral: true }).catch(() => null)
+            notify: (text, files) => interaction.followUp({ content: text, ephemeral: true, ...(files ? { files } : {}) }).catch(() => null)
         }).catch(err => console.error('softban snapshot error:', err));
     }
 }
@@ -1516,35 +1570,40 @@ async function pruneIndex() {
 
 async function getIndexedRefs(guildId, userId) {
     await flushIndex();
-    const { data, error } = await supabase
-        .from('message_index')
-        .select('channel_id, message_id')
-        .eq('guild_id', guildId)
-        .eq('user_id', userId)
-        .gt('created_at', new Date(Date.now() - INDEX_WINDOW_MS).toISOString())
-        .order('created_at', { ascending: true })
-        .limit(1000);
-    if (error) {
-        console.error('message index lookup error:', error);
-        return [];
+    const refs = [];
+    for (let from = 0; from < 3000; from += 1000) {
+        const { data, error } = await supabase
+            .from('message_index')
+            .select('channel_id, message_id')
+            .eq('guild_id', guildId)
+            .eq('user_id', userId)
+            .gt('created_at', new Date(Date.now() - INDEX_WINDOW_MS).toISOString())
+            .order('created_at', { ascending: false })
+            .range(from, from + 999);
+        if (error) {
+            console.error('message index lookup error:', error);
+            break;
+        }
+        refs.push(...data.map(r => ({ c: r.channel_id, m: r.message_id })));
+        if (data.length < 1000) break;
     }
-    return data.map(r => ({ c: r.channel_id, m: r.message_id }));
+    return refs;
 }
 
-async function scanUserRefs(guild, userId, days = 7) {
+async function scanUserRefs(guild, userId, days = 7, deadline = Infinity) {
     const since = Date.now() - days * 24 * 60 * 60 * 1000;
     const me = guild.members.me;
     const channels = [...guild.channels.cache.values()].filter(c => c.isTextBased() && c.viewable && c.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory));
     const found = [];
     let next = 0;
     const worker = async () => {
-        while (next < channels.length) {
+        while (next < channels.length && Date.now() < deadline) {
             const channel = channels[next++];
             let before;
-            for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10); page++) {
+            for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10) && Date.now() < deadline; page++) {
                 const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
                 if (!batch?.size) break;
-                for (const m of batch.values()) if (m.author.id === userId && m.createdTimestamp >= since) found.push({ c: channel.id, m: m.id, t: m.createdTimestamp });
+                for (const m of batch.values()) if (m.author.id === userId && m.createdTimestamp >= since) found.push({ c: channel.id, m: m.id, msg: m });
                 const oldest = batch.last();
                 if (oldest.createdTimestamp < since) break;
                 before = oldest.id;
@@ -1555,28 +1614,46 @@ async function scanUserRefs(guild, userId, days = 7) {
     return found;
 }
 
+const SCAN_CAP_COVERED_MS = 3000;
+const SCAN_CAP_OPEN_MS = 20000;
+
 async function collectUserRefs(guild, userId, days = 7) {
-    const [indexed, scanned] = await Promise.all([getIndexedRefs(guild.id, userId), scanUserRefs(guild, userId, days).catch(() => [])]);
+    const indexed = await getIndexedRefs(guild.id, userId);
+    const covered = indexed.length > 0 && days <= INDEX_WINDOW_MS / 86400000;
+    const deadline = Date.now() + (covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS);
+    const scanned = await scanUserRefs(guild, userId, days, deadline).catch(() => []);
     const byId = new Map(indexed.map(r => [r.m, r]));
-    for (const r of scanned) if (!byId.has(r.m)) byId.set(r.m, { c: r.c, m: r.m });
+    for (const r of scanned) byId.set(r.m, r);
     return [...byId.values()].slice(0, 3000);
 }
 
 async function fetchSnapshot(guild, refs) {
-    const found = [];
-    let missing = 0;
+    const found = new Map();
+    const byChannel = new Map();
+    for (const ref of refs) {
+        if (ref.msg) found.set(ref.m, ref.msg);
+        else byChannel.set(ref.c, [...(byChannel.get(ref.c) || []), ref.m]);
+    }
+    const groups = [...byChannel];
     let next = 0;
     const worker = async () => {
-        while (next < refs.length) {
-            const ref = refs[next++];
-            const channel = guild.channels.cache.get(ref.c) ?? await guild.channels.fetch(ref.c).catch(() => null);
-            const message = channel?.isTextBased() ? await channel.messages.fetch(ref.m).catch(() => null) : null;
-            if (message) found.push(message); else missing++;
+        while (next < groups.length) {
+            const [channelId, ids] = groups[next++];
+            const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
+            if (!channel?.isTextBased()) continue;
+            const wanted = new Set(ids);
+            const ordered = [...wanted].sort((x, y) => (BigInt(x) < BigInt(y) ? -1 : 1));
+            for (const id of ordered) {
+                if (found.has(id)) continue;
+                const batch = await channel.messages.fetch({ after: String(BigInt(id) - 1n), limit: 100 }).catch(() => null);
+                if (!batch) continue;
+                for (const m of batch.values()) if (wanted.has(m.id)) found.set(m.id, m);
+            }
         }
     };
     await Promise.all(Array.from({ length: 5 }, worker));
-    found.sort((x, y) => x.createdTimestamp - y.createdTimestamp);
-    return { messages: found, missing };
+    const messages = [...found.values()].sort((x, y) => x.createdTimestamp - y.createdTimestamp);
+    return { messages, missing: new Set(refs.map(r => r.m)).size - messages.length };
 }
 
 function buildBanTranscript(target, infraction, messages, missing) {
@@ -1599,17 +1676,19 @@ async function deleteSnapshotMessages(guild, messages) {
         byChannel.get(m.channelId).push(m.id);
         suppressedDeletes.add(m.id);
     }
-    for (const [channelId, ids] of byChannel) {
+    await Promise.all([...byChannel].map(async ([channelId, ids]) => {
         const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
-        if (!channel) continue;
+        if (!channel) return;
         for (let i = 0; i < ids.length; i += 100) {
             const chunk = ids.slice(i, i + 100);
             if (chunk.length === 1) await channel.messages.delete(chunk[0]).catch(err => console.error('ban cleanup delete error:', err.message));
             else await channel.bulkDelete(chunk, true).catch(err => console.error('ban cleanup delete error:', err.message));
         }
-    }
+    }));
     if (supabase) {
-        await supabase.from('message_index').delete().eq('guild_id', guild.id).in('message_id', messages.map(m => m.id));
+        for (let i = 0; i < messages.length; i += 200) {
+            await supabase.from('message_index').delete().eq('guild_id', guild.id).in('message_id', messages.slice(i, i + 200).map(m => m.id));
+        }
     }
 }
 
@@ -1664,7 +1743,34 @@ async function urgentPurge(guild, userId, days, banned) {
     return removed;
 }
 
-async function archiveAttachments(guild, messages, pending, target) {
+const ARCHIVE_PREFETCH_BYTES = 120 * 1024 * 1024;
+
+function prefetchAttachments(attachments) {
+    const out = new Map();
+    let budget = ARCHIVE_PREFETCH_BYTES;
+    const queue = [];
+    for (const a of attachments) {
+        if (a.size > MAX_UPLOAD_BYTES || a.size > budget) continue;
+        budget -= a.size;
+        queue.push(a);
+    }
+    let next = 0;
+    const worker = async () => {
+        while (next < queue.length) {
+            const a = queue[next++];
+            try {
+                const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
+                if (res.ok) out.set(a.id, Buffer.from(await res.arrayBuffer()));
+            } catch (err) {
+                console.error('archive prefetch error:', err.message);
+            }
+        }
+    };
+    return Promise.all(Array.from({ length: 6 }, worker)).then(() => out);
+}
+
+async function archiveAttachments(guild, messages, pending, target, prefetched) {
+    const held = prefetched ? await prefetched : new Map();
     const logChannel = await getLogChannel(guild, 'citation');
     if (!logChannel) return { archived: 0, failed: 0, skipped: [], refs: [], error: 'no log channel' };
 
@@ -1690,10 +1796,15 @@ async function archiveAttachments(guild, messages, pending, target) {
         const lines = [];
         await Promise.all(batch.items.map(async ({ a, m }, idx) => {
             try {
-                const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                let bytes = held.get(a.id);
+                if (!bytes) {
+                    const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    bytes = Buffer.from(await res.arrayBuffer());
+                }
+                held.delete(a.id);
                 const spoiler = /^(image|video)\//.test(a.contentType || '') ? 'SPOILER_' : '';
-                files[idx] = new AttachmentBuilder(Buffer.from(await res.arrayBuffer()), { name: `${spoiler}${m.id}-${safeName(a.name)}` });
+                files[idx] = new AttachmentBuilder(bytes, { name: `${spoiler}${m.id}-${safeName(a.name)}` });
                 lines[idx] = `${a.name}: ${m.url}`;
             } catch (err) {
                 console.error('archive download error:', err.message);
@@ -1817,8 +1928,11 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
     const { messages, missing } = await fetchSnapshot(guild, refs);
     const attachments = messages.flatMap(m => Array.from(m.attachments.values()));
     const totalBytes = attachments.reduce((n, a) => n + a.size, 0);
+    const prefetched = cleanup && attachments.length ? prefetchAttachments(attachments) : null;
 
-    const logged = await sendLog(guild, {
+    const transcriptName = `ban-${infraction.case_number}-${target.id}.txt`;
+    const transcriptText = buildBanTranscript(target, infraction, messages, missing);
+    const transcriptEntry = {
         title: `ban transcript: infraction #${infraction.case_number}`,
         kind: 'citation',
         color: COLORS.danger,
@@ -1828,10 +1942,36 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
             { name: 'unavailable', value: String(missing), inline: true },
             { name: 'attachments', value: attachments.length ? `${attachments.length} (${formatSize(totalBytes)})` : 'none', inline: true }
         ],
-        file: { name: `ban-${infraction.case_number}-${target.id}.txt`, content: buildBanTranscript(target, infraction, messages, missing) }
-    });
+        file: { name: transcriptName, content: transcriptText }
+    };
+    const postTranscript = async () => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            if (await sendLog(guild, transcriptEntry)) return true;
+            await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        }
+        return false;
+    };
+    const mePerms = logChannel.permissionsFor?.(guild.members.me);
+    const canPost = !!mePerms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles]);
+
+    let deleted = false;
+    let logged;
+    if (cleanup && canPost && messages.length) {
+        const posting = postTranscript();
+        await deleteSnapshotMessages(guild, messages);
+        deleted = true;
+        logged = await posting;
+    } else {
+        logged = await postTranscript();
+    }
     if (!logged) {
-        notify?.('could not write the ban transcript to the log channel, so their messages were left in place.');
+        if (deleted) {
+            const rescue = [new AttachmentBuilder(Buffer.from(transcriptText, 'utf8'), { name: transcriptName })];
+            console.error(`ban transcript for infraction #${infraction.case_number} could not be posted after deleting messages`);
+            notify?.('their messages were deleted, but the transcript could not be posted to the log channel after 3 tries. it is attached here, so save it.', rescue);
+        } else {
+            notify?.('could not write the ban transcript to the log channel, so their messages were left in place.');
+        }
         return;
     }
     notify?.(`transcript posted in the log channel: ${messages.length} message${messages.length === 1 ? '' : 's'} recovered${missing ? `, ${missing} unavailable` : ''}.`);
@@ -1840,8 +1980,9 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
     if (cleanup) {
         let archiveNote = '';
         let archivedFiles = 0;
+        if (!deleted) await deleteSnapshotMessages(guild, messages);
         if (attachments.length) {
-            const result = await archiveAttachments(guild, messages, { case_number: infraction.case_number }, target);
+            const result = await archiveAttachments(guild, messages, { case_number: infraction.case_number }, target, prefetched);
             if (result.refs.length) {
                 const { data: row } = await supabase.from('infractions').select('evidence_urls').eq('guild_id', guild.id).eq('case_number', infraction.case_number).maybeSingle();
                 await supabase.from('infractions').update({ evidence_urls: [...(row?.evidence_urls || []), ...result.refs] }).eq('guild_id', guild.id).eq('case_number', infraction.case_number);
@@ -1849,7 +1990,6 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
             archivedFiles = result.archived;
             archiveNote = `, ${result.archived} file${result.archived === 1 ? '' : 's'} archived${result.failed ? `, ${result.failed} failed` : ''}${result.skipped.length ? `, ${result.skipped.length} too large to re-upload` : ''}`;
         }
-        await deleteSnapshotMessages(guild, messages);
         if (archivedFiles) {
             const facts = [`> **Infraction:** \`#${infraction.case_number}\``, `> **User:** ${target.username} (<@${target.id}>)`, `> **Archived:** ${archivedFiles} file${archivedFiles === 1 ? '' : 's'} (${formatSize(totalBytes)})`, `> **Chat:** their messages were deleted`].join('\n');
             const files = clip(attachments.map(describeAttachment).join('\n'), 1200);
@@ -2209,6 +2349,32 @@ async function handleAutocomplete(interaction) {
     return interaction.respond(choices.slice(0, 25));
 }
 
+function renderAudit(guild, result) {
+    const tone = { critical: COLORS.danger, high: COLORS.danger, medium: COLORS.action, low: COLORS.info };
+    const worstSev = result.findings[0]?.sev;
+    const container = new ContainerBuilder().setAccentColor(worstSev ? tone[worstSev] : COLORS.good);
+    const tally = ['critical', 'high', 'medium', 'low'].map(s => `${result.counts[s]} ${s}`).join(' / ');
+    containerHeader(container, `## security audit\n${plainText(guild.name)}\n-# ${result.stats.roles} roles, ${result.stats.channels} channels checked\n**${tally}**`, okiteIcon());
+    let used = 200;
+    let hidden = 0;
+    for (const sev of ['critical', 'high', 'medium', 'low']) {
+        const group = result.findings.filter(f => f.sev === sev);
+        if (!group.length) continue;
+        const body = group.map(f => [`**${f.title}**`, ...f.lines.slice(0, 6).map(l => `> ${l}`)].join('\n')).join('\n');
+        const block = `### ${sev}\n${body}`;
+        if (used + block.length > MESSAGE_TEXT_BUDGET) { hidden += group.length; continue; }
+        used += block.length;
+        container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(block));
+    }
+    if (!result.findings.length) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock('nothing flagged.'));
+    const footer = [];
+    if (hidden) footer.push(`${hidden} more finding${hidden === 1 ? '' : 's'} are in the attached report`);
+    if (result.unchecked.length) footer.push(`could not check: ${result.unchecked.join('; ')}`);
+    if (footer.length) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(footer.map(f => `-# ${f}`).join('\n')));
+    container.addFileComponents(new FileBuilder().setURL('attachment://security-audit.txt'));
+    return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], files: [new AttachmentBuilder(Buffer.from(reportText(guild, result), 'utf8'), { name: 'security-audit.txt' })] };
+}
+
 async function handleInteraction(interaction) {
     if (interaction.isButton?.() && interaction.customId.startsWith('suggest_')) return;
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
@@ -2411,12 +2577,25 @@ async function handleInteraction(interaction) {
             const next = new Map(aliases).set(name, command);
             await saveAliases(guildId, next);
             logInBackground(interaction.guild, { title: replaced ? 'alias updated' : 'alias added', kind: 'server', fields: [{ name: 'moderator', value: who(interaction.user), inline: true }, { name: 'alias', value: `${prefix}${name}`, inline: true }, { name: 'runs', value: `${prefix}${command}` }] });
-            return interaction.reply({ content: `\`${prefix}${name}\` now runs \`${prefix}${command}\`${replaced ? ' (replaced the old one)' : ''}.\n${aliasSlotNotes(command)}`, ephemeral: true });
+            return interaction.reply({ content: `\`${prefix}${name}\` now runs \`${prefix}${command}\`${replaced ? " (previous one's been replaced)" : ''}. ${aliasSlotNotes(command)}`, ephemeral: true });
         }
 
         if (commandName === 'help') {
             if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
             return interaction.reply({ ...renderHelp(await getPrefix(guildId), options.getString('command')), ephemeral: true });
+        }
+
+        if (commandName === 'security-audit') {
+            if (!(perms.has(PermissionFlagsBits.ManageGuild) || perms.has(PermissionFlagsBits.Administrator))) {
+                return interaction.reply({ content: 'you need **Manage Server** to use this command.', ephemeral: true });
+            }
+            await interaction.deferReply({ ephemeral: true });
+            const guildConfig = process.env.MONGODB_URI ? await getCachedGuildConfig(guildId) : null;
+            const logChannelIds = [...new Set([...Object.values(LOG_KINDS).map(k => (guildConfig && guildConfig[k]) || config[k]), process.env.LOG_CHANNEL_ID].filter(Boolean))];
+            let result;
+            try { result = await auditGuild(interaction.guild, { logChannelIds }); }
+            catch (err) { return interaction.editReply({ content: `the audit failed: ${err.message}` }); }
+            return interaction.editReply(renderAudit(interaction.guild, result));
         }
 
         if (commandName === 'ping') {
@@ -2891,7 +3070,7 @@ async function handleInteraction(interaction) {
                     infraction,
                     moderatorId: interaction.user.id,
                     deleteAfter: true,
-                    notify: (text) => interaction.followUp({ content: text, ephemeral: true }).catch(() => null)
+                    notify: (text, files) => interaction.followUp({ content: text, ephemeral: true, ...(files ? { files } : {}) }).catch(() => null)
                 }).catch(err => console.error('ban snapshot error:', err));
             }
             return;
@@ -2905,6 +3084,16 @@ async function handleInteraction(interaction) {
                 .map(n => options.getUser(n))
                 .filter((u, i, arr) => u && arr.findIndex(x => x?.id === u.id) === i);
             return runCountPurge(interaction, { count: options.getInteger('count'), users });
+        }
+
+        if (commandName === 'obliterate') {
+            if (!isMod) {
+                return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
+            }
+            const target = options.getUser('user');
+            if (target.id === client.user.id) return interaction.reply({ content: 'okite will not purge its own messages.', ephemeral: true });
+            if (userPurgeRuns.has(guildId)) return interaction.reply({ content: 'a user purge is already running in this server.', ephemeral: true });
+            return runUserPurge(interaction, target);
         }
 
         if (commandName === 'infraction') {
@@ -3510,6 +3699,168 @@ async function runCountPurge(interaction, { count, users = [], beforeId, extraMe
     }
 }
 
+const userPurgeRuns = new Set();
+const USER_PURGE_TRANSCRIPT_BYTES = 3 * 1024 * 1024;
+const USER_PURGE_WORKERS = 4;
+const INTERACTION_LIFETIME_MS = 14 * 60 * 1000;
+
+async function purgeableChannels(guild) {
+    const me = guild.members.me;
+    const need = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages];
+    const channels = new Map();
+    let skipped = 0;
+    const add = (c) => {
+        if (channels.has(c.id)) return;
+        if (c.permissionsFor?.(me)?.has(need)) channels.set(c.id, c);
+        else skipped++;
+    };
+    const parents = [...guild.channels.cache.values()];
+    parents.filter(c => c.isTextBased() && !c.isThread()).forEach(add);
+    const active = await guild.channels.fetchActiveThreads().catch(() => null);
+    active?.threads?.forEach(add);
+    for (const parent of parents.filter(c => c.threads?.fetchArchived)) {
+        let before;
+        for (let page = 0; page < 10; page++) {
+            const archived = await parent.threads.fetchArchived({ type: 'public', limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+            if (!archived?.threads?.size) break;
+            archived.threads.forEach(add);
+            if (!archived.hasMore) break;
+            before = archived.threads.last();
+        }
+    }
+    return { channels: [...channels.values()], skipped };
+}
+
+async function eraseUserMessages(channel, messages, state) {
+    const edge = Date.now() - 13.9 * 24 * 60 * 60 * 1000;
+    for (const m of messages) {
+        suppressedDeletes.add(m.id);
+        if (state.bytes < USER_PURGE_TRANSCRIPT_BYTES) {
+            let extras = '';
+            if (m.attachments.size > 0) extras += ` [files: ${Array.from(m.attachments.values()).map(describeAttachment).join(', ')}]`;
+            if (m.embeds.length > 0) extras += ` [${m.embeds.length} embed(s)]`;
+            if (m.stickers.size > 0) extras += ` [stickers: ${m.stickers.map(st => st.name).join(', ')}]`;
+            if (m.reference?.messageId) extras += ` [reply to ${m.reference.messageId}]`;
+            const line = `[${m.createdAt.toISOString()}] #${channel.name ?? channel.id} <${m.id}>: ${m.content}${extras}`;
+            state.lines.push(line);
+            state.bytes += line.length + 1;
+        } else {
+            state.truncated = true;
+        }
+    }
+    const recent = messages.filter(m => m.createdTimestamp > edge);
+    const old = messages.filter(m => m.createdTimestamp <= edge);
+    const gone = (promise) => promise.then(() => 1).catch(() => { state.errors++; return 0; });
+    if (recent.length > 1) state.deleted += await channel.bulkDelete(recent.map(m => m.id), true).then(done => done.size).catch(() => { state.errors++; return 0; });
+    else for (const m of recent) state.deleted += await gone(m.delete());
+    for (const m of old) {
+        if (state.cancelled) break;
+        state.deleted += await gone(m.delete());
+    }
+}
+
+async function purgeUserInChannel(channel, userId, state) {
+    let before;
+    while (!state.cancelled) {
+        const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => { state.errors++; return null; });
+        if (!batch?.size) break;
+        state.scanned += batch.size;
+        const mine = [...batch.values()].filter(m => m.author.id === userId);
+        if (mine.length) await eraseUserMessages(channel, mine, state);
+        before = batch.last().id;
+    }
+}
+
+async function runUserPurge(interaction, target) {
+    const guild = interaction.guild;
+    await interaction.deferReply({ ephemeral: true });
+
+    const confirmRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('userpurge_confirm').setLabel(`delete everything from ${target.username}`.slice(0, 80)).setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('userpurge_cancel').setLabel('cancel').setStyle(ButtonStyle.Secondary)
+    );
+    const prompt = await interaction.editReply({
+        content: `this deletes every message from **${target.username}** that okite can reach: all channels, threads and voice chats, all the way back. it cannot be undone.\nmessages over 14 days old are deleted one at a time, so a big server can take hours. you can stop it while it runs. a transcript goes to the log channel when it ends. proceed?`,
+        components: [confirmRow]
+    });
+    const confirmation = await prompt.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 60000 }).catch(() => null);
+    if (!confirmation) return interaction.editReply({ content: 'confirmation timed out, nothing was deleted.', components: [] });
+    if (confirmation.customId === 'userpurge_cancel') return confirmation.update({ content: 'purge cancelled.', components: [] });
+    if (userPurgeRuns.has(guild.id)) return confirmation.update({ content: 'a user purge is already running in this server.', components: [] });
+
+    userPurgeRuns.add(guild.id);
+    const started = Date.now();
+    const state = { deleted: 0, scanned: 0, errors: 0, cancelled: false, truncated: false, lines: [], bytes: 0 };
+    let ticker;
+    let collector;
+    try {
+        const startLogged = await sendLog(guild, {
+            title: 'obliteration initiated',
+            kind: 'purge',
+            color: COLORS.danger,
+            fields: [
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'user', value: who(target), inline: true },
+                { name: 'scope', value: 'every channel and thread okite can reach, all time' }
+            ]
+        });
+        if (!startLogged) return confirmation.update({ content: 'could not write to the log channel, purge aborted so nothing gets deleted without a paper trail.', components: [] });
+
+        const stopRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('userpurge_stop').setLabel('stop').setStyle(ButtonStyle.Secondary));
+        await confirmation.update({ content: `scanning channels for **${target.username}**…`, components: [stopRow] });
+        collector = prompt.createMessageComponentCollector({ filter: i => i.user.id === interaction.user.id && i.customId === 'userpurge_stop', time: INTERACTION_LIFETIME_MS });
+        collector.on('collect', i => {
+            state.cancelled = true;
+            i.update({ content: 'stopping after the current batch…', components: [] }).catch(() => null);
+        });
+
+        const { channels, skipped } = await purgeableChannels(guild);
+        let done = 0;
+        ticker = setInterval(() => {
+            if (state.cancelled || Date.now() - started > INTERACTION_LIFETIME_MS) return;
+            interaction.editReply({ content: `purging **${target.username}**: scanned ${state.scanned.toLocaleString()} messages, ${done}/${channels.length} channels done, deleted ${state.deleted.toLocaleString()}.`, components: [stopRow] }).catch(() => null);
+        }, 5000);
+
+        let next = 0;
+        const worker = async () => {
+            while (next < channels.length && !state.cancelled) {
+                const channel = channels[next++];
+                await purgeUserInChannel(channel, target.id, state).catch(err => { state.errors++; console.error('user purge channel error:', err.message); });
+                done++;
+            }
+        };
+        await Promise.all(Array.from({ length: USER_PURGE_WORKERS }, worker));
+
+        forgetCachedMessagesBy(guild.id, target.id);
+        if (supabase) await supabase.from('message_index').delete().eq('guild_id', guild.id).eq('user_id', target.id);
+
+        const header = `user purge for ${target.username} (${target.id}) by ${interaction.user.username} (${interaction.user.id}) // ${state.deleted} deleted // newest first within each channel${state.truncated ? ' // transcript cut short, size limit' : ''}\n---`;
+        await sendLog(guild, {
+            title: state.cancelled ? 'obliteration stopped' : 'obliteration completed',
+            kind: 'purge',
+            color: COLORS.danger,
+            fields: [
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'user', value: who(target), inline: true },
+                { name: 'deleted', value: String(state.deleted), inline: true },
+                { name: 'scanned', value: String(state.scanned), inline: true },
+                { name: 'channels', value: `${done}/${channels.length}${skipped ? `, ${skipped} skipped (no access)` : ''}`, inline: true },
+                { name: 'failures', value: String(state.errors), inline: true },
+                { name: 'took', value: formatDuration(Date.now() - started), inline: true }
+            ],
+            ...(state.lines.length ? { file: { name: `obliterate-${target.id}-${Date.now()}.txt`, content: `${header}\n${state.lines.join('\n')}` } } : {})
+        });
+        await interaction.editReply({ content: `${state.cancelled ? 'stopped' : 'completed'}: deleted **${state.deleted.toLocaleString()}** messages from **${target.username}** after scanning ${state.scanned.toLocaleString()} in ${done}/${channels.length} channels${skipped ? ` (${skipped} skipped, no access)` : ''}${state.errors ? `, ${state.errors} failures` : ''}.`, components: [] }).catch(() => null);
+    } catch (error) {
+        console.error('user purge error:', error);
+        await interaction.editReply({ content: `the purge hit an error: ${error.message}. ${state.deleted} messages were deleted before it stopped.`, components: [] }).catch(() => null);
+    } finally {
+        clearInterval(ticker);
+        collector?.stop();
+        userPurgeRuns.delete(guild.id);
+    }
+}
+
 function editDistance(a, b) {
     const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
     for (let j = 1; j <= b.length; j++) d[0][j] = j;
@@ -3546,6 +3897,7 @@ const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
     setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
 };
@@ -3561,10 +3913,10 @@ const defaultPrefix = () => config.prefix || process.env.PREFIX || '!';
 const prefixCache = new Map();
 
 const HELP_GROUPS = [
-    ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
+    ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
     ['infractions', ['infraction', 'alias']],
     ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'bancleanup', 'timezone', 'rule']],
-    ['utility', ['ping', 'help']]
+    ['utility', ['ping', 'help', 'security-audit']]
 ];
 const COMMAND_HELP = require('./help');
 
@@ -3790,8 +4142,8 @@ function aliasSlotNotes(template) {
         ? ` heads up: word ${skipped.join(', ')} is not used, so it is dropped.`
         : '';
     return notes.length
-        ? `the words you type after it fill the command: ${notes.join(', ')}. any words left over are added at the end.${warning}`
-        : 'the words you type after it are added to the end of the command.';
+        ? `the arguments after it are augmented to the command. ${notes.join(', ')}. any words left over are augmented to the end.${warning}`
+        : 'the arguments after it are augmented to the command.';
 }
 
 function checkAlias(name, command, existing) {
@@ -4033,6 +4385,8 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
 
     if (name === 'ping') return { commandName: 'ping', subcommand, values };
 
+    if (name === 'security-audit') return { commandName: 'security-audit', subcommand, values };
+
     if (name === 'logchannels') return { commandName: 'logchannels', subcommand, values };
 
     if (name === 'prefix') {
@@ -4150,7 +4504,7 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
 }
 
 function isReadOnlyCommand(commandName, subcommand, values = {}) {
-    if (['ping', 'help', 'logchannels'].includes(commandName)) return true;
+    if (['ping', 'help', 'logchannels', 'security-audit'].includes(commandName)) return true;
     if (commandName === 'infraction') return ['view', 'user', 'moderator', 'recent'].includes(subcommand);
     if (commandName === 'rule' || commandName === 'alias') return subcommand === 'list';
     if (commandName === 'prefix') return !subcommand || subcommand === 'show';
@@ -4567,7 +4921,7 @@ async function logOfflineMessages(guild, result) {
                     { name: 'author', value: who({ id: r.author_id, username: r.author_name }), inline: true },
                     { name: 'channel', value: `<#${channelId}>`, inline: true },
                     { name: 'deleted by', value: 'unknown / while offline', inline: true },
-                    { name: 'content', value: clip(r.content, 2800) || '*(no text)*', code: !!r.content },
+                    { name: 'content', value: clip(r.content, 2800) || '*(no text)*', code: !!r.content, paint: paintRed },
                     linksField(r.content),
                     { name: 'attachments', value: files(r) },
                     { name: 'message id', value: r.message_id, inline: true },
@@ -4583,8 +4937,8 @@ async function logOfflineMessages(guild, result) {
         await logOffline(guild, { title: 'message edited', kind: 'messages', color: COLORS.action, fields: [
             { name: 'author', value: who(message.author), inline: true },
             { name: 'channel', value: `<#${message.channelId}>`, inline: true },
-            { name: 'before', value: clip(before) || '*(no text)*', code: !!before },
-            { name: 'after', value: clip(message.content) || '*(no text)*', code: !!message.content },
+            { name: 'before', value: clip(before) || '*(no text)*', code: !!before, paint: (t) => paintRemoved(t, message.content || '') },
+            { name: 'after', value: clip(message.content) || '*(no text)*', code: !!message.content, paint: (t) => paintAdded(t, before || '') },
             linksField(message.content),
             { name: 'jump', value: message.url }
         ] });
@@ -4715,7 +5069,7 @@ client.on(Events.MessageDelete, safe(async (message) => {
             { name: 'author', value: author ? who(author) : 'unknown (not cached)', inline: true },
             { name: 'channel', value: `<#${message.channelId}>`, inline: true },
             { name: 'deleted by', value: deletedBy, inline: true },
-            { name: 'content', value: clip(content, 2800) || (message.partial && !stored ? '*(not cached)*' : '*(no text)*'), code: !!content },
+            { name: 'content', value: clip(content, 2800) || (message.partial && !stored ? '*(not cached)*' : '*(no text)*'), code: !!content, paint: paintRed },
             linksField(content),
             { name: 'attachments', value: files },
             { name: 'message id', value: message.id, inline: true },
@@ -4771,8 +5125,8 @@ client.on(Events.MessageUpdate, safe(async (oldMessage, newMessage) => {
         fields: [
             { name: 'author', value: who(author), inline: true },
             { name: 'channel', value: `<#${newMessage.channelId}>`, inline: true },
-            { name: 'before', value: clip(before) || '*(not cached)*', code: !!before },
-            { name: 'after', value: clip(newMessage.content) || '*(no text)*', code: !!newMessage.content },
+            { name: 'before', value: clip(before) || '*(not cached)*', code: !!before, paint: (t) => paintRemoved(t, newMessage.content || '') },
+            { name: 'after', value: clip(newMessage.content) || '*(no text)*', code: !!newMessage.content, paint: (t) => paintAdded(t, before || '') },
             linksField(newMessage.content),
             { name: 'jump', value: newMessage.url }
         ]

@@ -59,6 +59,12 @@ module.exports = {
         desc: 'deletes recent messages.\nthe latest <count> messages are removed (max 1000), optionally only those from up to 10 users. as a reply, `purge` deletes from the replied message through the command itself. messages under 14 days old go in bulk, older ones one by one (slower). ranges over 200 need confirmation, and the purge is logged before anything is deleted.',
         perm: 'Manage Messages'
     },
+    'obliterate': {
+        summary: 'delete everything a user has sent, in every channel',
+        syntax: 'obliterate <user>',
+        desc: 'deletes every message from one user that okite can reach: all channels, threads and voice chats, all the way back.\nit asks you to confirm first, writes to the log channel before anything is deleted, and posts a transcript when it ends. messages under 14 days old go in bulk, older ones one at a time, so a large server can take hours. you can stop it from the progress message. only one runs per server at a time. slash command only.',
+        perm: 'Manage Messages'
+    },
     cite: {
         summary: 'cite a rule against a message',
         syntax: 'cite <rule id>\ncite custom <reason>',
@@ -148,6 +154,12 @@ module.exports = {
         syntax: 'rule list\nrule remove <id>',
         desc: 'lists or removes rules.\nrules are stored per server, and every infraction keeps a snapshot of the rule text from when it was recorded. use `/rule add` to add one.',
         perm: 'Manage Channels'
+    },
+    'security-audit': {
+        summary: 'audit the server\'s roles, channels and settings',
+        syntax: 'security-audit',
+        desc: 'audits the server for risky configuration and sends the result only to you, with the full report attached.\nflags roles that hold escalated permissions (split by whether they sit below or above okite), Administrator roles, roles that can hand out an Administrator role, other bots with Administrator, and @everyone permissions. also checks staff and log channels visible to everyone, overrides that delegate management, channels that open up a private category, the verification level, explicit media filter, 2FA, invites, webhooks and the widget. aliases: `audit`, `securityaudit`.',
+        perm: 'Manage Server'
     },
     ping: {
         summary: 'show latency to discord and the database, and uptime',

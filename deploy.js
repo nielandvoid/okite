@@ -125,6 +125,11 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
+        .setName("security-audit")
+        .setDescription(help['security-audit'].summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+    new SlashCommandBuilder()
         .setName("ping")
         .setDescription(help.ping.summary),
 
@@ -194,6 +199,12 @@ const commands = [
         .addUserOption(o => o.setName("user1").setDescription("only delete messages from this user"))
         .addUserOption(o => o.setName("user2").setDescription("also include this user"))
         .addUserOption(o => o.setName("user3").setDescription("also include this user")),
+
+    new SlashCommandBuilder()
+        .setName("obliterate")
+        .setDescription(help['obliterate'].summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addUserOption(o => o.setName("user").setDescription("the user whose messages to delete everywhere").setRequired(true)),
 
     new SlashCommandBuilder()
         .setName("kick")
