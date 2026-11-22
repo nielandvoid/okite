@@ -206,6 +206,34 @@ function paintTokens(tokens, color) {
     return open ? out + ANSI_RESET : out;
 }
 
+function describeChanges(before, after) {
+    const { a, b } = diffSides(before, after);
+    const changes = [];
+    let i = 0;
+    let j = 0;
+    while (i < a.length || j < b.length) {
+        if (a[i]?.changed || b[j]?.changed) {
+            let removed = '';
+            let added = '';
+            while (a[i]?.changed) removed += a[i++].t;
+            while (b[j]?.changed) added += b[j++].t;
+            changes.push({ removed: removed.trim(), added: added.trim() });
+        } else {
+            i++;
+            j++;
+        }
+    }
+    const show = (text) => `\`${clip(text.replace(/`/g, "'"), 80)}\``;
+    const lines = changes.slice(0, 8).map(({ removed, added }) => {
+        if (removed && added) return `${show(removed)} → ${show(added)}`;
+        if (removed) return `removed ${show(removed)}`;
+        if (added) return `added ${show(added)}`;
+        return null;
+    }).filter(Boolean);
+    if (changes.length > 8) lines.push(`…and ${changes.length - 8} more`);
+    return lines.join('\n');
+}
+
 const paintRemoved = (text, after) => paintTokens(diffSides(text, after).a, ANSI_YELLOW);
 const paintAdded = (text, before) => paintTokens(diffSides(before, text).b, ANSI_GREEN);
 
@@ -1449,12 +1477,28 @@ async function lookupCachedMessages(guildId, ids) {
     const found = new Map(cacheBuffer.filter(r => r.guild_id === guildId && ids.includes(r.message_id)).map(r => [r.message_id, r]));
     const missing = ids.filter(id => !found.has(id));
     if (supabase && missing.length) {
-        for (let i = 0; i < missing.length; i += 100) {
-            const { data } = await supabase.from('message_cache').select('*').eq('guild_id', guildId).in('message_id', missing.slice(i, i + 100));
-            (data || []).forEach(r => found.set(r.message_id, r));
-        }
+        const chunks = [];
+        for (let i = 0; i < missing.length; i += 100) chunks.push(missing.slice(i, i + 100));
+        const results = await Promise.all(chunks.map(chunk => supabase.from('message_cache').select('*').eq('guild_id', guildId).in('message_id', chunk)));
+        results.forEach(({ data }) => (data || []).forEach(r => found.set(r.message_id, r)));
     }
     return found;
+}
+
+function cachedAsMessage(row, guild) {
+    const stickers = row.stickers || [];
+    return {
+        id: row.message_id,
+        channelId: row.channel_id,
+        channel: guild.channels.cache.get(row.channel_id),
+        createdAt: new Date(row.created_at),
+        createdTimestamp: Date.parse(row.created_at),
+        content: row.content || '',
+        attachments: { size: 0, values: () => [] },
+        embeds: { length: row.embeds || 0 },
+        stickers: { size: stickers.length, map: (fn) => stickers.map((name) => fn({ name })) },
+        reference: row.reply_to ? { messageId: row.reply_to } : null
+    };
 }
 
 function forgetCachedMessages(guildId, ids) {
@@ -1574,7 +1618,7 @@ async function getIndexedRefs(guildId, userId) {
     for (let from = 0; from < 3000; from += 1000) {
         const { data, error } = await supabase
             .from('message_index')
-            .select('channel_id, message_id')
+            .select('channel_id, message_id, has_attachments')
             .eq('guild_id', guildId)
             .eq('user_id', userId)
             .gt('created_at', new Date(Date.now() - INDEX_WINDOW_MS).toISOString())
@@ -1584,7 +1628,7 @@ async function getIndexedRefs(guildId, userId) {
             console.error('message index lookup error:', error);
             break;
         }
-        refs.push(...data.map(r => ({ c: r.channel_id, m: r.message_id })));
+        refs.push(...data.map(r => ({ c: r.channel_id, m: r.message_id, a: r.has_attachments })));
         if (data.length < 1000) break;
     }
     return refs;
@@ -1615,7 +1659,7 @@ async function scanUserRefs(guild, userId, days = 7, deadline = Infinity) {
 }
 
 const SCAN_CAP_COVERED_MS = 3000;
-const SCAN_CAP_OPEN_MS = 20000;
+const SCAN_CAP_OPEN_MS = 45000;
 
 async function collectUserRefs(guild, userId, days = 7) {
     const indexed = await getIndexedRefs(guild.id, userId);
@@ -1745,28 +1789,74 @@ async function urgentPurge(guild, userId, days, banned) {
 
 const ARCHIVE_PREFETCH_BYTES = 120 * 1024 * 1024;
 
-function prefetchAttachments(attachments) {
+function createPrefetcher() {
     const out = new Map();
+    const pending = [];
     let budget = ARCHIVE_PREFETCH_BYTES;
-    const queue = [];
-    for (const a of attachments) {
-        if (a.size > MAX_UPLOAD_BYTES || a.size > budget) continue;
-        budget -= a.size;
-        queue.push(a);
-    }
+    let active = 0;
+    const waiting = [];
+    const slot = async () => {
+        if (active >= 6) await new Promise(resolve => waiting.push(resolve));
+        active++;
+    };
+    const release = () => {
+        active--;
+        waiting.shift()?.();
+    };
+    return {
+        add(attachments) {
+            for (const a of attachments) {
+                if (a.size > MAX_UPLOAD_BYTES || a.size > budget) continue;
+                budget -= a.size;
+                pending.push((async () => {
+                    await slot();
+                    try {
+                        const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
+                        if (res.ok) out.set(a.id, Buffer.from(await res.arrayBuffer()));
+                    } catch (err) {
+                        console.error('archive prefetch error:', err.message);
+                    } finally {
+                        release();
+                    }
+                })());
+            }
+        },
+        done: () => Promise.all(pending).then(() => out)
+    };
+}
+
+function prefetchAttachments(attachments) {
+    const prefetcher = createPrefetcher();
+    prefetcher.add(attachments);
+    return prefetcher.done();
+}
+
+const snowflakeTime = (id) => Number(BigInt(id) >> 22n) + 1420070400000;
+
+async function sweepUserMessages(guild, userId, days, capMs, onFound) {
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const deadline = Date.now() + capMs;
+    const me = guild.members.me;
+    const channels = [...guild.channels.cache.values()]
+        .filter(c => c.isTextBased() && c.viewable && c.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory) && !(c.lastMessageId && snowflakeTime(c.lastMessageId) < since))
+        .sort((x, y) => (BigInt(y.lastMessageId || 0) > BigInt(x.lastMessageId || 0) ? 1 : -1));
     let next = 0;
     const worker = async () => {
-        while (next < queue.length) {
-            const a = queue[next++];
-            try {
-                const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
-                if (res.ok) out.set(a.id, Buffer.from(await res.arrayBuffer()));
-            } catch (err) {
-                console.error('archive prefetch error:', err.message);
+        while (next < channels.length && Date.now() < deadline) {
+            const channel = channels[next++];
+            let before;
+            for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10) && Date.now() < deadline; page++) {
+                const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+                if (!batch?.size) break;
+                const mine = [...batch.values()].filter(m => m.author.id === userId && m.createdTimestamp >= since);
+                if (mine.length) await onFound(channel, mine);
+                const oldest = batch.last();
+                if (oldest.createdTimestamp < since) break;
+                before = oldest.id;
             }
         }
     };
-    return Promise.all(Array.from({ length: 6 }, worker)).then(() => out);
+    await Promise.all(Array.from({ length: 8 }, worker));
 }
 
 async function archiveAttachments(guild, messages, pending, target, prefetched) {
@@ -1918,17 +2008,77 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         notify?.(NO_LOG_NOTE);
         return;
     }
-    const refs = await collectUserRefs(guild, target.id, days);
-    if (!refs.length) {
+    const mePerms = logChannel.permissionsFor?.(guild.members.me);
+    const canPost = !!mePerms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles]);
+    const streaming = cleanup && canPost;
+    const noMessages = async () => {
         await sendLog(guild, { title: `ban snapshot: infraction #${infraction.case_number}`, kind: 'citation', color: COLORS.muted, description: `no messages from ${target.username} found in the last ${days} days.` });
         notify?.(`no transcript: no messages from **${target.username}** were found in the last ${days} days.`);
-        return;
-    }
+    };
 
-    const { messages, missing } = await fetchSnapshot(guild, refs);
+    let messages;
+    let missing = 0;
+    let prefetched = null;
+    let deleted = false;
+    if (streaming) {
+        const prefetcher = createPrefetcher();
+        const seen = new Set();
+        const collected = [];
+        const removal = { deleted: 0, errors: 0, cancelled: false };
+        const take = async (channel, found) => {
+            const fresh = found.filter(m => !seen.has(m.id));
+            if (!fresh.length) return;
+            fresh.forEach(m => { seen.add(m.id); collected.push(m); prefetcher.add(m.attachments.values()); });
+            await deleteUserMessages(channel, fresh, removal);
+        };
+        const startedAt = Date.now();
+        const indexed = await getIndexedRefs(guild.id, target.id);
+        const indexedAt = Date.now();
+        let quickCount = 0;
+        if (indexed.length) {
+            const cache = await lookupCachedMessages(guild.id, indexed.map(r => r.m));
+            const quick = indexed.filter(r => !r.a && cache.has(r.m));
+            const slow = indexed.filter(r => r.a || !cache.has(r.m));
+            quickCount = quick.length;
+            const quickByChannel = new Map();
+            for (const r of quick) quickByChannel.set(r.c, [...(quickByChannel.get(r.c) || []), r.m]);
+            const lanes = [...quickByChannel].map(async ([channelId, ids]) => {
+                const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
+                if (!channel) return;
+                ids.forEach(id => seen.add(id));
+                collected.push(...ids.map(id => cachedAsMessage(cache.get(id), guild)));
+                await eraseMessages(channel, ids);
+            });
+            if (slow.length) {
+                lanes.push(fetchSnapshot(guild, slow).then(async (snap) => {
+                    missing = snap.missing;
+                    const byChannel = new Map();
+                    for (const m of snap.messages) byChannel.set(m.channelId, [...(byChannel.get(m.channelId) || []), m]);
+                    await Promise.all([...byChannel].map(([channelId, list]) => take(guild.channels.cache.get(channelId) ?? list[0].channel, list)));
+                }));
+            }
+            await Promise.all(lanes);
+        }
+        const indexedDone = Date.now();
+        const covered = indexed.length > 0 && days <= INDEX_WINDOW_MS / 86400000;
+        await sweepUserMessages(guild, target.id, days, covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS, take);
+        console.log(`ban cleanup #${infraction.case_number}: index lookup ${indexedAt - startedAt}ms (${indexed.length} refs, ${quickCount} deleted without fetching), indexed deletes done at ${indexedDone - startedAt}ms, sweep done at ${Date.now() - startedAt}ms, ${collected.length} messages total`);
+        forgetCachedMessagesBy(guild.id, target.id);
+        if (supabase) await supabase.from('message_index').delete().eq('guild_id', guild.id).eq('user_id', target.id);
+        messages = collected.sort((x, y) => x.createdTimestamp - y.createdTimestamp);
+        prefetched = prefetcher.done();
+        deleted = true;
+        if (!messages.length) return noMessages();
+    } else {
+        const refs = await collectUserRefs(guild, target.id, days);
+        if (!refs.length) return noMessages();
+        const snap = await fetchSnapshot(guild, refs);
+        messages = snap.messages;
+        missing = snap.missing;
+    }
     const attachments = messages.flatMap(m => Array.from(m.attachments.values()));
     const totalBytes = attachments.reduce((n, a) => n + a.size, 0);
-    const prefetched = cleanup && attachments.length ? prefetchAttachments(attachments) : null;
+    if (!streaming && cleanup && attachments.length) prefetched = prefetchAttachments(attachments);
 
     const transcriptName = `ban-${infraction.case_number}-${target.id}.txt`;
     const transcriptText = buildBanTranscript(target, infraction, messages, missing);
@@ -1951,19 +2101,7 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         }
         return false;
     };
-    const mePerms = logChannel.permissionsFor?.(guild.members.me);
-    const canPost = !!mePerms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles]);
-
-    let deleted = false;
-    let logged;
-    if (cleanup && canPost && messages.length) {
-        const posting = postTranscript();
-        await deleteSnapshotMessages(guild, messages);
-        deleted = true;
-        logged = await posting;
-    } else {
-        logged = await postTranscript();
-    }
+    const logged = await postTranscript();
     if (!logged) {
         if (deleted) {
             const rescue = [new AttachmentBuilder(Buffer.from(transcriptText, 'utf8'), { name: transcriptName })];
@@ -3731,10 +3869,22 @@ async function purgeableChannels(guild) {
     return { channels: [...channels.values()], skipped };
 }
 
-async function eraseUserMessages(channel, messages, state) {
+async function deleteUserMessages(channel, messages, state) {
     const edge = Date.now() - 13.9 * 24 * 60 * 60 * 1000;
+    for (const m of messages) suppressedDeletes.add(m.id);
+    const recent = messages.filter(m => m.createdTimestamp > edge);
+    const old = messages.filter(m => m.createdTimestamp <= edge);
+    const gone = (promise) => promise.then(() => 1).catch(() => { state.errors++; return 0; });
+    if (recent.length > 1) state.deleted += await channel.bulkDelete(recent.map(m => m.id), true).then(done => done.size).catch(() => { state.errors++; return 0; });
+    else for (const m of recent) state.deleted += await gone(m.delete());
+    for (const m of old) {
+        if (state.cancelled) break;
+        state.deleted += await gone(m.delete());
+    }
+}
+
+async function eraseUserMessages(channel, messages, state) {
     for (const m of messages) {
-        suppressedDeletes.add(m.id);
         if (state.bytes < USER_PURGE_TRANSCRIPT_BYTES) {
             let extras = '';
             if (m.attachments.size > 0) extras += ` [files: ${Array.from(m.attachments.values()).map(describeAttachment).join(', ')}]`;
@@ -3748,15 +3898,7 @@ async function eraseUserMessages(channel, messages, state) {
             state.truncated = true;
         }
     }
-    const recent = messages.filter(m => m.createdTimestamp > edge);
-    const old = messages.filter(m => m.createdTimestamp <= edge);
-    const gone = (promise) => promise.then(() => 1).catch(() => { state.errors++; return 0; });
-    if (recent.length > 1) state.deleted += await channel.bulkDelete(recent.map(m => m.id), true).then(done => done.size).catch(() => { state.errors++; return 0; });
-    else for (const m of recent) state.deleted += await gone(m.delete());
-    for (const m of old) {
-        if (state.cancelled) break;
-        state.deleted += await gone(m.delete());
-    }
+    await deleteUserMessages(channel, messages, state);
 }
 
 async function purgeUserInChannel(channel, userId, state) {
@@ -4939,6 +5081,7 @@ async function logOfflineMessages(guild, result) {
             { name: 'channel', value: `<#${message.channelId}>`, inline: true },
             { name: 'before', value: clip(before) || '*(no text)*', code: !!before, paint: (t) => paintRemoved(t, message.content || '') },
             { name: 'after', value: clip(message.content) || '*(no text)*', code: !!message.content, paint: (t) => paintAdded(t, before || '') },
+            { name: 'diff', value: before && message.content ? describeChanges(before, message.content) : '' },
             linksField(message.content),
             { name: 'jump', value: message.url }
         ] });
@@ -5127,6 +5270,7 @@ client.on(Events.MessageUpdate, safe(async (oldMessage, newMessage) => {
             { name: 'channel', value: `<#${newMessage.channelId}>`, inline: true },
             { name: 'before', value: clip(before) || '*(not cached)*', code: !!before, paint: (t) => paintRemoved(t, newMessage.content || '') },
             { name: 'after', value: clip(newMessage.content) || '*(no text)*', code: !!newMessage.content, paint: (t) => paintAdded(t, before || '') },
+            { name: 'diff', value: before && newMessage.content ? describeChanges(before, newMessage.content) : '' },
             linksField(newMessage.content),
             { name: 'jump', value: newMessage.url }
         ]
