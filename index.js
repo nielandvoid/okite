@@ -1805,10 +1805,11 @@ function createPrefetcher() {
     };
     return {
         add(attachments) {
+            const mine = [];
             for (const a of attachments) {
                 if (a.size > MAX_UPLOAD_BYTES || a.size > budget) continue;
                 budget -= a.size;
-                pending.push((async () => {
+                const job = (async () => {
                     await slot();
                     try {
                         const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
@@ -1818,8 +1819,11 @@ function createPrefetcher() {
                     } finally {
                         release();
                     }
-                })());
+                })();
+                pending.push(job);
+                mine.push(job);
             }
+            return Promise.all(mine);
         },
         done: () => Promise.all(pending).then(() => out)
     };
@@ -2028,7 +2032,9 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         const take = async (channel, found) => {
             const fresh = found.filter(m => !seen.has(m.id));
             if (!fresh.length) return;
-            fresh.forEach(m => { seen.add(m.id); collected.push(m); prefetcher.add(m.attachments.values()); });
+            const downloads = [];
+            fresh.forEach(m => { seen.add(m.id); collected.push(m); downloads.push(prefetcher.add(m.attachments.values())); });
+            await Promise.race([Promise.all(downloads), new Promise(resolve => setTimeout(resolve, 10000))]);
             await deleteUserMessages(channel, fresh, removal);
         };
         const startedAt = Date.now();
@@ -2126,6 +2132,9 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
                 await supabase.from('infractions').update({ evidence_urls: [...(row?.evidence_urls || []), ...result.refs] }).eq('guild_id', guild.id).eq('case_number', infraction.case_number);
             }
             archivedFiles = result.archived;
+            if (!archivedFiles) {
+                await sendLog(guild, { title: `attachments not archived: infraction #${infraction.case_number}`, kind: 'citation', color: COLORS.muted, description: `${attachments.length} attachment${attachments.length === 1 ? '' : 's'} from ${target.username} could not be copied before their messages were deleted${result.error ? ` (${result.error})` : ''}. the file names are in the transcript.` });
+            }
             archiveNote = `, ${result.archived} file${result.archived === 1 ? '' : 's'} archived${result.failed ? `, ${result.failed} failed` : ''}${result.skipped.length ? `, ${result.skipped.length} too large to re-upload` : ''}`;
         }
         if (archivedFiles) {
