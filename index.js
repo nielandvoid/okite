@@ -158,7 +158,7 @@ function codeBlock(text, lang = '') {
 
 const ANSI_RED = '\u001b[0;31m';
 const ANSI_YELLOW = '\u001b[0;33m';
-const ANSI_GREEN = '\u001b[0;32m';
+const ANSI_BLUE = '\u001b[0;34m';
 const ANSI_RESET = '\u001b[0m';
 const stripEscapes = (text) => String(text).replace(/\u001b/g, '');
 const paintRed = (text) => `${ANSI_RED}${stripEscapes(text)}${ANSI_RESET}`;
@@ -206,7 +206,7 @@ function paintTokens(tokens, color) {
     return open ? out + ANSI_RESET : out;
 }
 
-function describeChanges(before, after) {
+function listChanges(before, after) {
     const { a, b } = diffSides(before, after);
     const changes = [];
     let i = 0;
@@ -217,25 +217,33 @@ function describeChanges(before, after) {
             let added = '';
             while (a[i]?.changed) removed += a[i++].t;
             while (b[j]?.changed) added += b[j++].t;
-            changes.push({ removed: removed.trim(), added: added.trim() });
+            if (removed.trim() || added.trim()) changes.push({ removed: clip(removed.trim().replace(/\s+/g, ' '), 80), added: clip(added.trim().replace(/\s+/g, ' '), 80) });
         } else {
             i++;
             j++;
         }
     }
-    const show = (text) => `\`${clip(text.replace(/`/g, "'"), 80)}\``;
+    return changes;
+}
+
+function renderChanges(changes) {
+    const show = (text) => `\`${text.replace(/`/g, "'")}\``;
     const lines = changes.slice(0, 8).map(({ removed, added }) => {
         if (removed && added) return `${show(removed)} → ${show(added)}`;
         if (removed) return `removed ${show(removed)}`;
-        if (added) return `added ${show(added)}`;
-        return null;
-    }).filter(Boolean);
+        return `added ${show(added)}`;
+    });
     if (changes.length > 8) lines.push(`…and ${changes.length - 8} more`);
     return lines.join('\n');
 }
 
+const diffField = (before, after) => {
+    const changes = before && after ? listChanges(before, after) : [];
+    return { name: 'diff', value: renderChanges(changes), section: true, quote: true, plain: true };
+};
+
 const paintRemoved = (text, after) => paintTokens(diffSides(text, after).a, ANSI_YELLOW);
-const paintAdded = (text, before) => paintTokens(diffSides(before, text).b, ANSI_GREEN);
+const paintAdded = (text, before) => paintTokens(diffSides(before, text).b, ANSI_BLUE);
 
 const ISO_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
 const prettyTimes = (text) => String(text).replace(ISO_TIME, (iso) => `<t:${Math.floor(Date.parse(iso) / 1000)}:f>`);
@@ -244,7 +252,7 @@ function renderLogEmbed({ title, color = COLORS.info, description, fields = [], 
     const valid = fields.filter(f => f && f.value !== undefined && f.value !== null && f.value !== '');
     const isShort = (f) => !f.code && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
-    const sections = valid.filter(f => !isShort(f)).map(f => `**${sentenceCase(String(f.name))}**\n${f.code ? (f.paint ? codeBlock(f.paint(cut(String(f.value), 1500)), 'ansi') : codeBlock(cut(String(f.value), 1500))) : (f.quote ? String(f.value).slice(0, 1000).split('\n').map(l => `> ${l}`).join('\n') : String(f.value).slice(0, 1000))}`);
+    const sections = valid.filter(f => !isShort(f)).map(f => `${f.plain ? sentenceCase(String(f.name)) : `**${sentenceCase(String(f.name))}**`}\n${f.code ? (f.paint ? codeBlock(f.paint(cut(String(f.value), 1500)), 'ansi') : codeBlock(cut(String(f.value), 1500))) : (f.quote ? String(f.value).slice(0, 1000).split('\n').map(l => `> ${l}`).join('\n') : String(f.value).slice(0, 1000))}`);
     let body = [description, quoted.join('\n'), ...sections].filter(Boolean).join('\n\n').slice(0, 4000);
     const padding = Number(process.env.EMBED_PAD_WIDTH) || 0;
     if (padding > 0) body += `\n${'\u2800'.repeat(Math.min(padding, 200))}`;
@@ -296,7 +304,7 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     const isMain = (f) => f.code || (String(f.name).toLowerCase() === 'reason' && !PLACEHOLDER_REASONS.has(String(f.value).toLowerCase()));
     const isShort = (f) => !isMain(f) && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
-    const sections = valid.filter(f => !isShort(f)).map(f => ({ label: sentenceCase(String(f.name)), value: String(f.value), code: isMain(f), quote: !!f.quote, paint: f.paint }));
+    const sections = valid.filter(f => !isShort(f)).map(f => ({ label: sentenceCase(String(f.name)), value: String(f.value), code: isMain(f), quote: !!f.quote, paint: f.paint, plain: !!f.plain }));
 
     const person = valid.find(f => AVATAR_FIELDS.includes(String(f.name).toLowerCase()) && /<@!?(\d+)>/.test(String(f.value)));
     const id = person && String(person.value).match(/<@!?(\d+)>/)[1];
@@ -312,7 +320,7 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     const footer = `-# ${by}<t:${Math.floor(Date.now() / 1000)}:f>`;
 
     const head = [`## ${sentenceCase(title).slice(0, 200)}`, description, quoted.join('\n')].filter(Boolean).join('\n');
-    const render = (sec) => (sec.code ? `**${sec.label}**\n${sec.paint ? codeBlock(sec.paint(sec.text), 'ansi') : codeBlock(sec.text)}` : `**${sec.label}**\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
+    const render = (sec) => (sec.code ? `**${sec.label}**\n${sec.paint ? codeBlock(sec.paint(sec.text), 'ansi') : codeBlock(sec.text)}` : `${sec.plain ? sec.label : `**${sec.label}**`}\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
     const parts = sections.map(sec => ({ ...sec, text: sec.value }));
     const total = (h) => h.length + footer.length + parts.reduce((n, p) => n + render(p).length, 0);
     let headText = head;
@@ -5090,7 +5098,7 @@ async function logOfflineMessages(guild, result) {
             { name: 'channel', value: `<#${message.channelId}>`, inline: true },
             { name: 'before', value: clip(before) || '*(no text)*', code: !!before, paint: (t) => paintRemoved(t, message.content || '') },
             { name: 'after', value: clip(message.content) || '*(no text)*', code: !!message.content, paint: (t) => paintAdded(t, before || '') },
-            { name: 'diff', value: before && message.content ? describeChanges(before, message.content) : '' },
+            diffField(before, message.content),
             linksField(message.content),
             { name: 'jump', value: message.url }
         ] });
@@ -5279,7 +5287,7 @@ client.on(Events.MessageUpdate, safe(async (oldMessage, newMessage) => {
             { name: 'channel', value: `<#${newMessage.channelId}>`, inline: true },
             { name: 'before', value: clip(before) || '*(not cached)*', code: !!before, paint: (t) => paintRemoved(t, newMessage.content || '') },
             { name: 'after', value: clip(newMessage.content) || '*(no text)*', code: !!newMessage.content, paint: (t) => paintAdded(t, before || '') },
-            { name: 'diff', value: before && newMessage.content ? describeChanges(before, newMessage.content) : '' },
+            diffField(before, newMessage.content),
             linksField(newMessage.content),
             { name: 'jump', value: newMessage.url }
         ]
