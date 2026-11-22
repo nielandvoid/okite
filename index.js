@@ -1,5 +1,6 @@
 const {
     Client, 
+    ActivityType,
     GatewayIntentBits,
     Events,
     ActionRowBuilder,
@@ -29,7 +30,7 @@ const {
 
 const http = require('http');
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => res.end('okite online')).listen(PORT, () => {
+http.createServer((req, res) => { if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); } res.end('okite online'); }).listen(PORT, () => {
     console.log(`http server listening on port ${PORT}`);
 });
 
@@ -42,7 +43,7 @@ const FULL_INTENTS = [
     GatewayIntentBits.GuildVoiceStates
 ];
 const LIMITED_INTENTS = FULL_INTENTS.filter(i => i !== GatewayIntentBits.GuildMembers && i !== GatewayIntentBits.MessageContent);
-const clientOptions = { failIfNotExists: false, partials: [Partials.Message, Partials.Channel] };
+const clientOptions = { presence: { status: 'idle' }, failIfNotExists: false, partials: [Partials.Message, Partials.Channel] };
 let client = new Client({ ...clientOptions, intents: FULL_INTENTS });
 
 const mongoose = require('mongoose');
@@ -319,6 +320,12 @@ async function sendLog(guild, entry) {
     }
     return !!sent;
 }
+
+const fetchAttachment = (url, options = {}) => {
+    const host = new URL(url).hostname;
+    if (!/^(cdn\.discordapp\.com|media\.discordapp\.net)$/.test(host)) throw new Error('attachment is not on discord\'s cdn');
+    return fetch(url, options);
+};
 
 const who = (user) => user ? `<@${user.id}> (\`${user.tag ?? user.username}\` / ${user.id})` : 'unknown';
 const clip = (text, n = 1000) => (text && text.length > n) ? text.slice(0, n - 1) + '…' : (text || '');
@@ -752,11 +759,13 @@ async function setInfractionVoid(interaction, id, voiding, reason) {
 }
 
 const botKicks = new Set();
+const slowmodeBefore = new Map();
 const botUnbans = new Set();
 
 const MOD_ACTIONS = {
     kick: { flag: PermissionFlagsBits.KickMembers, label: 'Kick Members' },
     softban: { flag: PermissionFlagsBits.BanMembers, label: 'Ban Members' },
+    unban: { flag: PermissionFlagsBits.BanMembers, label: 'Ban Members' },
     mute: { flag: PermissionFlagsBits.ModerateMembers, label: 'Timeout Members' },
     unmute: { flag: PermissionFlagsBits.ModerateMembers, label: 'Timeout Members' }
 };
@@ -805,10 +814,34 @@ async function convertQuickBanToSoftban(guildId, userId) {
     return row;
 }
 
+const banOf = (guild, userId) => guild.bans.fetch({ user: userId, force: true }).catch(() => null);
+
 async function runModAction(interaction, kind) {
     const { options, guild, guildId } = interaction;
     const target = options.getUser('user');
     if (target.id === interaction.user.id || target.id === client.user.id) return interaction.editReply(`you can't ${kind} that user.`);
+
+    if (kind === 'unban') {
+        const reason = options.getString('reason') || 'not specified';
+        if (!(await banOf(guild, target.id))) return interaction.editReply(`**${target.username}** isn't banned.`);
+        const unbanKey = `${guildId}:${target.id}`;
+        botUnbans.add(unbanKey);
+        try { await guild.members.unban(target, `${interaction.user.tag ?? interaction.user.username}: ${reason}`.slice(0, 500)); }
+        catch (err) { botUnbans.delete(unbanKey); return interaction.editReply(`unban failed: ${err.message}`); }
+        setTimeout(() => botUnbans.delete(unbanKey), 30000).unref();
+        await endPunishments(guildId, target.id, 'ban');
+        logInBackground(guild, {
+            title: 'member unbanned',
+            kind: 'moderation',
+            color: COLORS.good,
+            fields: [
+                { name: 'user', value: who(target), inline: true },
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'reason', value: reason }
+            ]
+        });
+        return interaction.editReply(`unbanned **${target.username}**.`);
+    }
 
     const member = await guild.members.fetch(target.id).catch(() => null);
     if ((kind === 'kick' || kind === 'mute') && !member) return interaction.editReply('that user isn\'t in this server.');
@@ -824,6 +857,8 @@ async function runModAction(interaction, kind) {
     const duration = durationInput ? parseDuration(durationInput) : { permanent: true, ms: null, label: 'Permanent' };
     if (!duration) return interaction.editReply(BAD_DURATION);
     if (!duration.permanent && duration.ms < 10000) return interaction.editReply('a mute needs to be at least 10 seconds.');
+
+    if (kind === 'softban' && await banOf(guild, target.id)) return interaction.editReply(`**${target.username}** is already banned, and a softban would lift that ban. use /unban if that is what you want.`);
 
     const key = `${guildId}:${target.id}`;
     const auditReason = (text) => `${interaction.user.tag ?? interaction.user.username}: ${text}`.slice(0, 500);
@@ -900,7 +935,7 @@ async function runModAction(interaction, kind) {
     setTimeout(() => { botBans.delete(key); botUnbans.delete(key); }, 30000).unref();
     const infraction = await record('softban');
     logInBackground(guild, { title: `member softbanned${infraction ? `: infraction #${infraction.case_number}` : ''}`, kind: 'moderation', color: COLORS.danger, fields: logFields(infraction, 'moderator').filter(f => f.name !== 'duration') });
-    const logsOn = await messageLogsOn(guild.id);
+    const logsOn = await snapshotsOn(guild.id);
     const logReady = logsOn && Boolean(await getLogChannel(guild, 'citation'));
     const askNoLog = infraction && supabase && logsOn && !logReady;
     await interaction.editReply({
@@ -1266,7 +1301,7 @@ async function downloadAttachments(attachments, budget = MAX_UPLOAD_BYTES) {
     }
     const results = await Promise.all(wanted.map(async (a, i) => {
         try {
-            const res = await fetch(a.url, { signal: AbortSignal.timeout(15000) });
+            const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(15000) });
             if (!res.ok) throw new Error(`status ${res.status}`);
             return { name: `${i + 1}-${safeName(a.name)}`, buffer: Buffer.from(await res.arrayBuffer()), image: !!a.contentType?.startsWith('image/'), alt: altText(a) };
         } catch (err) {
@@ -1496,6 +1531,37 @@ async function getIndexedRefs(guildId, userId) {
     return data.map(r => ({ c: r.channel_id, m: r.message_id }));
 }
 
+async function scanUserRefs(guild, userId, days = 7) {
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const me = guild.members.me;
+    const channels = [...guild.channels.cache.values()].filter(c => c.isTextBased() && c.viewable && c.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory));
+    const found = [];
+    let next = 0;
+    const worker = async () => {
+        while (next < channels.length) {
+            const channel = channels[next++];
+            let before;
+            for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10); page++) {
+                const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+                if (!batch?.size) break;
+                for (const m of batch.values()) if (m.author.id === userId && m.createdTimestamp >= since) found.push({ c: channel.id, m: m.id, t: m.createdTimestamp });
+                const oldest = batch.last();
+                if (oldest.createdTimestamp < since) break;
+                before = oldest.id;
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker));
+    return found;
+}
+
+async function collectUserRefs(guild, userId, days = 7) {
+    const [indexed, scanned] = await Promise.all([getIndexedRefs(guild.id, userId), scanUserRefs(guild, userId, days).catch(() => [])]);
+    const byId = new Map(indexed.map(r => [r.m, r]));
+    for (const r of scanned) if (!byId.has(r.m)) byId.set(r.m, { c: r.c, m: r.m });
+    return [...byId.values()].slice(0, 3000);
+}
+
 async function fetchSnapshot(guild, refs) {
     const found = [];
     let missing = 0;
@@ -1538,13 +1604,64 @@ async function deleteSnapshotMessages(guild, messages) {
         if (!channel) continue;
         for (let i = 0; i < ids.length; i += 100) {
             const chunk = ids.slice(i, i + 100);
-            if (chunk.length === 1) await channel.messages.delete(chunk[0]).catch(() => null);
+            if (chunk.length === 1) await channel.messages.delete(chunk[0]).catch(err => console.error('ban cleanup delete error:', err.message));
             else await channel.bulkDelete(chunk, true).catch(err => console.error('ban cleanup delete error:', err.message));
         }
     }
     if (supabase) {
         await supabase.from('message_index').delete().eq('guild_id', guild.id).in('message_id', messages.map(m => m.id));
     }
+}
+
+const urgentBans = new Map();
+const urgentActive = (guildId, userId) => (urgentBans.get(`${guildId}:${userId}`) ?? 0) > Date.now();
+
+async function eraseMessages(channel, ids) {
+    let removed = 0;
+    for (const id of ids) suppressedDeletes.add(id);
+    for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        if (chunk.length === 1) removed += await channel.messages.delete(chunk[0]).then(() => 1).catch(() => 0);
+        else removed += await channel.bulkDelete(chunk, true).then(done => done.size).catch(err => { console.error('urgent delete error:', err.message); return 0; });
+    }
+    forgetCachedMessages(channel.guild.id, ids);
+    return removed;
+}
+
+async function urgentPurge(guild, userId, days, banned) {
+    let removed = 0;
+    await flushIndex();
+    const newest = supabase ? await supabase.from('message_index').select('channel_id, message_id').eq('guild_id', guild.id).eq('user_id', userId).order('created_at', { ascending: false }).limit(10).then(r => r.data || [], () => []) : [];
+    if (!(await banned)) return 0;
+
+    const quick = new Map();
+    for (const r of newest) quick.set(r.channel_id, [...(quick.get(r.channel_id) || []), r.message_id]);
+    const channelFor = async (id) => guild.channels.cache.get(id) ?? await guild.channels.fetch(id).catch(() => null);
+    const counts = await Promise.all([...quick].map(async ([channelId, ids]) => { const channel = await channelFor(channelId); return channel ? eraseMessages(channel, ids) : 0; }));
+    removed += counts.reduce((a, b) => a + b, 0);
+
+    const since = Date.now() - days * 24 * 60 * 60 * 1000;
+    const me = guild.members.me;
+    const state = [...guild.channels.cache.values()]
+        .filter(c => c.isTextBased() && c.viewable && c.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory))
+        .map(channel => ({ channel, before: undefined, done: false }));
+    for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10) && state.some(c => !c.done); page++) {
+        const pending = state.filter(c => !c.done);
+        let next = 0;
+        const worker = async () => {
+            while (next < pending.length) {
+                const c = pending[next++];
+                const batch = await c.channel.messages.fetch({ limit: 100, ...(c.before ? { before: c.before } : {}) }).catch(() => null);
+                if (!batch?.size) { c.done = true; continue; }
+                const mine = [...batch.values()].filter(m => m.author.id === userId && m.createdTimestamp >= since).map(m => m.id);
+                if (mine.length) removed += await eraseMessages(c.channel, mine);
+                const oldest = batch.last();
+                if (oldest.createdTimestamp < since) c.done = true; else c.before = oldest.id;
+            }
+        };
+        await Promise.all(Array.from({ length: 8 }, worker));
+    }
+    return removed;
 }
 
 async function archiveAttachments(guild, messages, pending, target) {
@@ -1573,7 +1690,7 @@ async function archiveAttachments(guild, messages, pending, target) {
         const lines = [];
         await Promise.all(batch.items.map(async ({ a, m }, idx) => {
             try {
-                const res = await fetch(a.url);
+                const res = await fetchAttachment(a.url, { signal: AbortSignal.timeout(30000) });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const spoiler = /^(image|video)\//.test(a.contentType || '') ? 'SPOILER_' : '';
                 files[idx] = new AttachmentBuilder(Buffer.from(await res.arrayBuffer()), { name: `${spoiler}${m.id}-${safeName(a.name)}` });
@@ -1677,7 +1794,10 @@ const noLogButtons = (userId, caseNumber) => new ActionRowBuilder().addComponent
 
 // after ban; transcript, attachments prompt
 async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAfter, notify }) {
-    if (!(await messageLogsOn(guild.id))) {
+    const settings = await getAutoPurge(guild.id);
+    const cleanup = settings.banCleanup && deleteAfter;
+    const days = cleanup ? settings.banCleanupDays : 7;
+    if (!settings.messageLogs && !cleanup) {
         notify?.(NO_LOGS_NOTE);
         return;
     }
@@ -1687,9 +1807,10 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         notify?.(NO_LOG_NOTE);
         return;
     }
-    const refs = await getIndexedRefs(guild.id, target.id);
+    const refs = await collectUserRefs(guild, target.id, days);
     if (!refs.length) {
-        await sendLog(guild, { title: `ban snapshot: infraction #${infraction.case_number}`, kind: 'citation', color: COLORS.muted, description: `no indexed messages for ${target.username} in the last 7 days.` });
+        await sendLog(guild, { title: `ban snapshot: infraction #${infraction.case_number}`, kind: 'citation', color: COLORS.muted, description: `no messages from ${target.username} found in the last ${days} days.` });
+        notify?.(`no transcript: no messages from **${target.username}** were found in the last ${days} days.`);
         return;
     }
 
@@ -1713,7 +1834,47 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         notify?.('could not write the ban transcript to the log channel, so their messages were left in place.');
         return;
     }
+    notify?.(`transcript posted in the log channel: ${messages.length} message${messages.length === 1 ? '' : 's'} recovered${missing ? `, ${missing} unavailable` : ''}.`);
     if (messages.length === 0) return;
+
+    if (cleanup) {
+        let archiveNote = '';
+        let archivedFiles = 0;
+        if (attachments.length) {
+            const result = await archiveAttachments(guild, messages, { case_number: infraction.case_number }, target);
+            if (result.refs.length) {
+                const { data: row } = await supabase.from('infractions').select('evidence_urls').eq('guild_id', guild.id).eq('case_number', infraction.case_number).maybeSingle();
+                await supabase.from('infractions').update({ evidence_urls: [...(row?.evidence_urls || []), ...result.refs] }).eq('guild_id', guild.id).eq('case_number', infraction.case_number);
+            }
+            archivedFiles = result.archived;
+            archiveNote = `, ${result.archived} file${result.archived === 1 ? '' : 's'} archived${result.failed ? `, ${result.failed} failed` : ''}${result.skipped.length ? `, ${result.skipped.length} too large to re-upload` : ''}`;
+        }
+        await deleteSnapshotMessages(guild, messages);
+        if (archivedFiles) {
+            const facts = [`> **Infraction:** \`#${infraction.case_number}\``, `> **User:** ${target.username} (<@${target.id}>)`, `> **Archived:** ${archivedFiles} file${archivedFiles === 1 ? '' : 's'} (${formatSize(totalBytes)})`, `> **Chat:** their messages were deleted`].join('\n');
+            const files = clip(attachments.map(describeAttachment).join('\n'), 1200);
+            const warning = '**If any of this may be illegal (such as CSAM), choose "erase"**, then report it with Discord\'s Report Message and to your national hotline.';
+            const decide = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`ban_keep:${infraction.case_number}`).setLabel('archive').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`ban_remove:${infraction.case_number}`).setLabel('erase').setStyle(ButtonStyle.Danger)
+            );
+            const avatar = target.displayAvatarURL?.();
+            let prompt = null;
+            if (USE_CONTAINERS) {
+                const container = containerHeader(new ContainerBuilder().setAccentColor(COLORS.danger), `## Attachments archived from ${target.username}\n${facts}`, avatar || okiteIcon());
+                container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`**Files**\n${codeBlock(files)}`));
+                container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(warning));
+                prompt = await logChannel.send({ flags: V2_FLAG, components: [container, decide], allowedMentions: { parse: [] } }).catch(err => { console.error('archive prompt container error:', err.message); return null; });
+            }
+            if (!prompt) {
+                const embed = new EmbedBuilder().setColor(COLORS.danger).setTitle(`Attachments archived from ${target.username}`).setDescription([facts, `**Files**\n${files}`, warning].join('\n\n')).setTimestamp();
+                if (avatar) embed.setThumbnail(avatar);
+                await logChannel.send({ embeds: [embed], components: [decide], allowedMentions: { parse: [] } }).catch(err => console.error('archive prompt error:', err.message));
+            }
+        }
+        notify?.(`cleaned up: ${messages.length} message${messages.length === 1 ? '' : 's'} deleted from chat${archiveNote}. the transcript is in the log channel.`);
+        return;
+    }
 
     if (attachments.length === 0) {
         if (deleteAfter) await deleteSnapshotMessages(guild, messages);
@@ -1723,7 +1884,7 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
     const promptFacts = [`> **Infraction:** \`#${infraction.case_number}\``, `> **User:** ${target.username} (<@${target.id}>)`, `> **Attachments:** ${attachments.length} (${formatSize(totalBytes)})`, `> **Transcript:** already logged`, `> **Copied so far:** nothing`, `> **Validity:** ${BAN_PROMPT_HOURS}h`].join('\n');
     const promptFiles = clip(attachments.map(describeAttachment).join('\n'), 1200);
     const promptNotice = deleteAfter
-        ? `Their messages stay up until you answer, then okite deletes them. If nobody answers they are deleted after ${BAN_PROMPT_HOURS} hours and nothing is saved.`
+        ? `Their attachments stay up until you answer, then okite deletes them. If nobody answers they are deleted after ${BAN_PROMPT_HOURS} hours and nothing is saved.`
         : 'Their messages were not deleted by this ban.';
     const promptWarning = '**Do not save anything that may be illegal (such as CSAM).** Choose "don\'t save", then report it with Discord\'s Report Message and to your national hotline.';
     const avatar = target.displayAvatarURL?.();
@@ -1975,8 +2136,30 @@ async function fetchRangeMessages(channel, startId, endId) {
     return { messages: collected, startFound, endFound };
 }
 
+const STATUSES = [
+    '#aura 💯💯',
+    'cooked. you? also cooked.',
+    'DON\'T REACT.',
+    'ban roulette',
+    'mods are sleeping btw',
+    'rules are a social construct (rule 4)',
+    'a fight i did not start',
+    'you type a paragraph then delete it',
+    '(btw you\'re hilarious)'
+];
+
+let lastStatus = -1;
+function rotateStatus(c) {
+    let i;
+    do { i = Math.floor(Math.random() * STATUSES.length); } while (i === lastStatus && STATUSES.length > 1);
+    lastStatus = i;
+    c.user.setPresence({ status: 'idle', activities: [{ name: 'custom', type: ActivityType.Custom, state: STATUSES[i] }] });
+}
+
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`ready - logged in as ${readyClient.user.tag}`);
+    rotateStatus(readyClient);
+    setInterval(() => rotateStatus(readyClient), 5 * 60 * 1000).unref();
     sweepPendingBans().catch(err => console.error(err));
     sweepTimedPunishments().catch(err => console.error('timed punishment sweep error:', err));
     runCatchUp().catch(err => console.error('catch-up error:', err));
@@ -2027,6 +2210,7 @@ async function handleAutocomplete(interaction) {
 }
 
 async function handleInteraction(interaction) {
+    if (interaction.isButton?.() && interaction.customId.startsWith('suggest_')) return;
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
 
     if (!interaction.guild) {
@@ -2040,7 +2224,7 @@ async function handleInteraction(interaction) {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
 
-        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'timezone', 'alias', 'rule', 'lock', 'unlock'].includes(commandName) && !isManager) {
+        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
             return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
 
@@ -2075,7 +2259,7 @@ async function handleInteraction(interaction) {
             const wanted = options.getBoolean('enabled');
             const current = await getAutoPurge(guildId);
             if (!target || wanted === null || wanted === undefined) {
-                return interaction.reply({ content: `**auto-purge settings**\n**commands**: ${current.commands ? 'on' : 'off'} (delete the prefix command and the bot's reply right after it runs)\n**parent**: ${current.parent ? 'on' : 'off'} (delete the message being cited or infractioned once it is logged)\nchange one with \`/autopurge target:<commands|parent> enabled:<true|false>\`.`, ephemeral: true });
+                return interaction.reply({ content: `**auto-purge settings**\n**commands**: ${current.commands ? 'on' : 'off'} (delete the prefix command and the bot's reply right after it runs)\n**parent**: ${current.parent ? 'on' : 'off'} (delete the message being cited or infractioned once it is logged)\n**result**: ${current.result ? 'on' : 'off'} (delete the bot's purge result reply a few seconds after a purge)\nchange one with \`/autopurge target:<commands|parent|result> enabled:<true|false>\`.`, ephemeral: true });
             }
             await setAutoPurge(guildId, target, wanted);
             const replied = interaction.reply({ content: `auto-purge **${target}** is now **${wanted ? 'on' : 'off'}**.`, ephemeral: true });
@@ -2126,6 +2310,30 @@ async function handleInteraction(interaction) {
                     { name: 'moderator', value: who(interaction.user), inline: true },
                     { name: 'before', value: current ? 'on' : 'off', inline: true },
                     { name: 'now', value: wanted ? 'on' : 'off', inline: true }
+                ]
+            });
+            return replied;
+        }
+
+        if (commandName === 'bancleanup') {
+            const wanted = options.getBoolean('enabled');
+            const days = options.getInteger('days');
+            const current = await getAutoPurge(guildId);
+            const describe = (on, d) => `ban cleanup is **${on ? 'on' : 'off'}**${on ? `, covering the last **${d} day${d === 1 ? '' : 's'}**` : ''}.`;
+            if ((wanted === null || wanted === undefined) && !days) {
+                return interaction.reply({ content: `${describe(current.banCleanup, current.banCleanupDays)} when on (the default), a ban or softban builds a transcript and archives the attachments in the log channel from that many days of messages in every channel, then deletes those messages from chat. when off, their messages stay until staff answer the save prompt.`, ephemeral: true });
+            }
+            if (wanted !== null && wanted !== undefined) await setAutoPurge(guildId, 'bancleanup', wanted);
+            if (days) await setAutoPurge(guildId, 'bancleanupdays', days);
+            const now = await getAutoPurge(guildId);
+            const replied = interaction.reply({ content: describe(now.banCleanup, now.banCleanupDays), ephemeral: true });
+            logInBackground(interaction.guild, {
+                title: 'ban cleanup changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current.banCleanup ? `on, ${current.banCleanupDays}d` : 'off', inline: true },
+                    { name: 'now', value: now.banCleanup ? `on, ${now.banCleanupDays}d` : 'off', inline: true }
                 ]
             });
             return replied;
@@ -2359,6 +2567,99 @@ async function handleInteraction(interaction) {
             }
         }
 
+        if (commandName === 'setnick') {
+            if (!(perms.has(PermissionFlagsBits.ManageNicknames) || perms.has(PermissionFlagsBits.Administrator))) {
+                return interaction.reply({ content: 'you need **Manage Nicknames** to use this command.', ephemeral: true });
+            }
+            const target = options.getUser('user');
+            const typed = options.getString('nickname')?.trim();
+            if (!typed) return interaction.reply({ content: 'no nick / display-name passed. nothing changed.', ephemeral: true });
+            if (typed.length > 32) return interaction.reply({ content: 'a nickname can be at most 32 characters.', ephemeral: true });
+            const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+            if (!member) return interaction.reply({ content: 'that user isn\'t in this server.', ephemeral: true });
+            if (!member.manageable) return interaction.reply({ content: 'okite can\'t change that nickname (their top role is above okite\'s, or they own the server).', ephemeral: true });
+            if (member.id !== interaction.user.id && interaction.guild.ownerId !== interaction.user.id && interaction.member.roles.highest.comparePositionTo(member.roles.highest) <= 0) {
+                return interaction.reply({ content: 'their top role is as high as yours or higher.', ephemeral: true });
+            }
+            const before = member.displayName;
+            const clearing = /^(reset|clear)$/i.test(typed);
+            try { await member.setNickname(clearing ? null : typed, `${interaction.user.tag ?? interaction.user.username}: setnick`); }
+            catch (err) { return interaction.reply({ content: `nickname change failed: ${err.message}`, ephemeral: true }); }
+            logInBackground(interaction.guild, {
+                title: 'nickname set by moderator',
+                kind: 'moderation',
+                color: COLORS.info,
+                fields: [
+                    { name: 'user', value: who(target), inline: true },
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: before, inline: true },
+                    { name: 'now', value: clearing ? '(reset)' : typed, inline: true }
+                ]
+            });
+            return interaction.reply({ content: clearing ? `reset the nickname of **${target.username}** (was **${before}**).` : `**${target.username}**: **${before}** → **${typed}**.`, ephemeral: true });
+        }
+
+        if (commandName === 'slowmode') {
+            const channel = options.getChannel('channel') || interaction.channel;
+            if (!channel?.setRateLimitPerUser) return interaction.reply({ content: 'slowmode can\'t be set on that channel.', ephemeral: true });
+            const sub = options.getSubcommand();
+            const before = channel.rateLimitPerUser ?? 0;
+            let seconds;
+            if (sub === 'revert') {
+                seconds = slowmodeBefore.get(channel.id) ?? 0;
+            } else {
+                const raw = String(options.getString('time') ?? '').trim().toLowerCase();
+                if (/^(0|off|none|disable)$/.test(raw)) seconds = 0;
+                else {
+                    const parsed = parseDuration(raw);
+                    if (!parsed || parsed.permanent) return interaction.reply({ content: 'that isn\'t a time. use something like `5s`, `10s`, `2m`, `1h` (up to 6h), or `off`.', ephemeral: true });
+                    seconds = Math.round(parsed.ms / 1000);
+                    if (seconds > 21600) return interaction.reply({ content: 'slowmode can be at most 6 hours.', ephemeral: true });
+                }
+            }
+            try { await channel.setRateLimitPerUser(seconds, `${interaction.user.tag ?? interaction.user.username}: slowmode ${sub}`); }
+            catch (err) { return interaction.reply({ content: `slowmode change failed: ${err.message}`, ephemeral: true }); }
+            if (sub === 'revert') slowmodeBefore.delete(channel.id); else slowmodeBefore.set(channel.id, before);
+            const show = (n) => (n ? formatDuration(n * 1000) : 'off');
+            logInBackground(interaction.guild, {
+                title: 'slowmode changed',
+                kind: 'moderation',
+                color: COLORS.info,
+                fields: [
+                    { name: 'channel', value: `<#${channel.id}>`, inline: true },
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: show(before), inline: true },
+                    { name: 'now', value: show(seconds), inline: true }
+                ]
+            });
+            return interaction.reply({ content: `slowmode in <#${channel.id}>: **${show(before)}** → **${show(seconds)}**${sub === 'revert' ? ' (reverted)' : ''}.`, ephemeral: true });
+        }
+
+        if (commandName === 'sendmessage') {
+            if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
+            const channel = options.getChannel('channel');
+            const content = options.getString('message');
+            if (!channel?.isTextBased?.() || !content?.trim()) return interaction.reply({ content: 'give a text channel and a message.', ephemeral: true });
+            if (!channel.permissionsFor(interaction.member)?.has(PermissionFlagsBits.SendMessages)) {
+                return interaction.reply({ content: 'you can\'t send messages in that channel yourself, so okite won\'t either.', ephemeral: true });
+            }
+            let sent;
+            try { sent = await channel.send({ content: content.slice(0, 2000), allowedMentions: { parse: [] } }); }
+            catch (err) { return interaction.reply({ content: `couldn't send there: ${err.message}`, ephemeral: true }); }
+            logInBackground(interaction.guild, {
+                title: 'message sent by okite',
+                kind: 'moderation',
+                color: COLORS.info,
+                fields: [
+                    { name: 'channel', value: `<#${channel.id}>`, inline: true },
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'message', value: clip(content, 1000) },
+                    { name: 'link', value: sent.url }
+                ]
+            });
+            return interaction.reply({ content: `sent in <#${channel.id}>: ${sent.url}`, ephemeral: true });
+        }
+
         if (commandName === 'lock' || commandName === 'unlock') {
             const isLocking = commandName === 'lock';
             const targetChannel = options.getChannel('channel') || interaction.channel;
@@ -2497,14 +2798,16 @@ async function handleInteraction(interaction) {
             const durationInput = options.getString('duration');
             const banDuration = durationInput ? parseDuration(durationInput) : null;
             if (durationInput && !banDuration) return interaction.editReply(BAD_DURATION);
-            const resolved = await resolveRuleFields(guildId, options.getString('rule'), options.getString('reason') || 'no reason given');
-            if (resolved.error) return interaction.editReply(resolved.error);
-            const reason = resolved.reason;
-
             if (target.id === interaction.user.id || target.id === client.user.id) {
                 return interaction.editReply('you can\'t ban that user.');
             }
-            const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+            const [resolved, member, alreadyBanned] = await Promise.all([
+                resolveRuleFields(guildId, options.getString('rule'), options.getString('reason') || 'no reason given'),
+                interaction.guild.members.fetch(target.id).catch(() => null),
+                banOf(interaction.guild, target.id)
+            ]);
+            if (resolved.error) return interaction.editReply(resolved.error);
+            const reason = resolved.reason;
             if (member) {
                 if (!member.bannable) return interaction.editReply('okite can\'t ban that user (their top role is above okite\'s, or they own the server).');
                 if (interaction.guild.ownerId !== interaction.user.id && interaction.member.roles.highest.comparePositionTo(member.roles.highest) <= 0) {
@@ -2512,15 +2815,27 @@ async function handleInteraction(interaction) {
                 }
             }
 
+            if (alreadyBanned) {
+                return interaction.editReply(`**${target.username}** is already banned${urgent ? ', so banning again cannot delete their messages. use /purge for those' : ''}.`);
+            }
+
             const key = `${interaction.guildId}:${target.id}`;
             botBans.add(key);
+            let purge = null;
+            if (urgent) {
+                urgentBans.set(key, Date.now() + 15 * 60 * 1000);
+                forgetCachedMessagesBy(interaction.guildId, target.id);
+            }
+            const banCall = interaction.guild.members.ban(target, {
+                deleteMessageSeconds: urgent ? 7 * 24 * 60 * 60 : 0,
+                reason: `${interaction.user.tag}: ${reason}`.slice(0, 500)
+            });
+            if (urgent) purge = urgentPurge(interaction.guild, target.id, (await getAutoPurge(interaction.guildId)).banCleanupDays, banCall.then(() => true, () => false));
             try {
-                await interaction.guild.members.ban(target, {
-                    deleteMessageSeconds: urgent ? 7 * 24 * 60 * 60 : 0,
-                    reason: `${interaction.user.tag}: ${reason}`.slice(0, 500)
-                });
+                await banCall;
             } catch (err) {
                 botBans.delete(key);
+                urgentBans.delete(key);
                 return interaction.editReply(`ban failed: ${err.message}`);
             }
             setTimeout(() => botBans.delete(key), 30000).unref();
@@ -2537,14 +2852,14 @@ async function handleInteraction(interaction) {
             });
             const timed = banDuration && !banDuration.permanent;
 
-            const logsOn = await messageLogsOn(interaction.guildId);
+            const logsOn = await snapshotsOn(interaction.guildId);
             const logReady = logsOn && Boolean(await getLogChannel(interaction.guild, 'citation'));
             const askNoLog = !urgent && infraction && supabase && logsOn && !logReady;
             await interaction.editReply({ components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : [], content:
                 `banned **${target.username}**${timed ? ` for ${banDuration.label}` : ''}${infraction ? ` (infraction #${infraction.case_number})` : ''}.` +
                 (timed && timedColumnsMissing() ? ' the database is missing the duration columns (run db/infractions_duration.sql), so this ban will not lift itself.' : '') +
                 (urgent
-                    ? ' their last 7 days of messages were deleted immediately and nothing was saved. if this was illegal content, report it with Discord\'s Report Message and to your national hotline.'
+                    ? ' clearing their messages now, nothing is saved. if this was illegal content, report it with Discord\'s Report Message and to your national hotline.'
                     : (!supabase ? ' (no database configured, so no transcript or snapshot.)' : !logsOn ? ` ${NO_LOGS_NOTE}` : logReady ? ' building the transcript now.' : ` ${NO_LOG_CHOICE}`))
             });
 
@@ -2560,6 +2875,14 @@ async function handleInteraction(interaction) {
                     { name: 'mode', value: urgent ? 'urgent: history deleted immediately, nothing saved' : 'messages kept until staff decide' }
                 ]
             });
+
+            if (purge) {
+                purge.then(async (removed) => {
+                    forgetCachedMessagesBy(interaction.guildId, target.id);
+                    if (supabase) await supabase.from('message_index').delete().eq('guild_id', interaction.guildId).eq('user_id', target.id);
+                    await interaction.followUp({ content: `cleared **${removed}** message${removed === 1 ? '' : 's'} from **${target.username}**. nothing was saved.`, ephemeral: true }).catch(() => null);
+                }).catch(err => console.error('urgent purge error:', err));
+            }
 
             if (!urgent && infraction && supabase && logReady) {
                 runBanSnapshot({
@@ -2725,7 +3048,7 @@ async function handleInteraction(interaction) {
     }
 
     const isRuleModal = interaction.isModalSubmit() && interaction.customId === 'rule_add_modal';
-    const isBanPrompt = interaction.isButton() && interaction.customId.startsWith('ban_');
+    const isBanPrompt = interaction.isButton() && (interaction.customId.startsWith('ban_') || interaction.customId.startsWith('nolog_'));
     const isRulePage = interaction.isButton() && interaction.customId.startsWith('rulepage:');
     const canBan = perms && (perms.has(PermissionFlagsBits.BanMembers) || perms.has(PermissionFlagsBits.Administrator));
     if (!isMod && !(isRuleModal && isManager) && !(isRulePage && isManager) && !(isBanPrompt && canBan)) {
@@ -2857,22 +3180,42 @@ async function handleInteraction(interaction) {
             return interaction.update({ content: `left their messages in place (infraction #${caseNumber}), decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
         }
         await interaction.deferUpdate();
-        const { messages } = await fetchSnapshot(interaction.guild, await getIndexedRefs(interaction.guildId, userId));
+        const { messages } = await fetchSnapshot(interaction.guild, await collectUserRefs(interaction.guild, userId, (await getAutoPurge(interaction.guildId)).banCleanupDays));
         if (messages.length) await deleteSnapshotMessages(interaction.guild, messages);
         console.log(`purged ${messages.length} message(s) for infraction #${caseNumber} with no transcript, decided by ${interaction.user.id}`);
         return interaction.editReply({ content: `${messages.length} message(s) purged without a transcript (infraction #${caseNumber}), decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
     }
 
+    if (interaction.isButton() && /^ban_(keep|remove):/.test(interaction.customId)) {
+        const [action, caseNumber] = interaction.customId.split(':');
+        await interaction.deferUpdate();
+        let note = `archive kept (infraction #${caseNumber}), decided by ${interaction.user}.`;
+        if (action === 'ban_remove') {
+            const { data: row } = await supabase.from('infractions').select('evidence_urls').eq('guild_id', interaction.guildId).eq('case_number', Number(caseNumber)).maybeSingle();
+            const evidence = row?.evidence_urls || [];
+            let removed = 0;
+            for (const ref of evidence.filter(r => r.startsWith('msg:'))) {
+                const [, channelId, messageId] = ref.split(':');
+                const channel = interaction.guild.channels.cache.get(channelId) ?? await interaction.guild.channels.fetch(channelId).catch(() => null);
+                if (await channel?.messages.delete(messageId).then(() => true).catch(() => false)) removed++;
+            }
+            await supabase.from('infractions').update({ evidence_urls: evidence.filter(r => !r.startsWith('msg:')) }).eq('guild_id', interaction.guildId).eq('case_number', Number(caseNumber));
+            note = `archived files removed (${removed} post${removed === 1 ? '' : 's'}, infraction #${caseNumber}), decided by ${interaction.user}.`;
+        }
+        const container = interaction.message?.components?.[0]?.type === ComponentType.Container;
+        return interaction.editReply(container ? { components: [noticeContainer(note)] } : { content: note, embeds: [], components: [], allowedMentions: { parse: [] } });
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith('ban_')) {
         const [action, id] = interaction.customId.split(':');
+        await interaction.deferUpdate();
         const pending = supabase ? await claimPendingBan(id) : null;
         const containerPrompt = interaction.message?.components?.[0]?.type === ComponentType.Container;
         if (!pending || pending.guild_id !== interaction.guildId) {
             const note = 'this prompt was already handled or has expired.';
-            return interaction.update(containerPrompt ? { components: [noticeContainer(note)] } : { content: note, components: [] });
+            return interaction.editReply(containerPrompt ? { components: [noticeContainer(note)] } : { content: note, components: [] });
         }
 
-        await interaction.deferUpdate();
         const summary = await finalizeBan(interaction.guild, pending, { save: action === 'ban_save', by: interaction.user });
         if (containerPrompt) return;
         return interaction.editReply({ content: `${summary} decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
@@ -3201,8 +3544,8 @@ function fuzzyMatch(input, words) {
 
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
-    kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute',
-    setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', timezone: 'timezone', tz: 'timezone',
+    kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
+    setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
 };
@@ -3211,16 +3554,16 @@ const ALIAS_SUBS = { add: 'add', new: 'add', create: 'add', remove: 'remove', rm
 const RULE_SUBS = { add: 'add', remove: 'remove', rm: 'remove', delete: 'remove', list: 'list', ls: 'list' };
 const PREFIX_SUBS = { show: 'show', set: 'set', reset: 'reset', default: 'reset' };
 const ON_OFF = { on: 'on', enable: 'on', true: 'on', yes: 'on', off: 'off', disable: 'off', false: 'off', no: 'off' };
-const AUTOPURGE_TARGETS = { commands: 'commands', command: 'commands', parent: 'parent', parents: 'parent' };
+const AUTOPURGE_TARGETS = { commands: 'commands', command: 'commands', parent: 'parent', parents: 'parent', result: 'result', results: 'result', prompt: 'result' };
 const LOG_WORDS = { general: 'general', citation: 'citation', citations: 'citation', purge: 'purge', purges: 'purge', moderation: 'moderation', messages: 'messages', members: 'members', voice: 'voice', server: 'server' };
 
 const defaultPrefix = () => config.prefix || process.env.PREFIX || '!';
 const prefixCache = new Map();
 
 const HELP_GROUPS = [
-    ['moderation', ['ban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'cite', 'lock', 'unlock']],
+    ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'timezone', 'rule']],
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'bancleanup', 'timezone', 'rule']],
     ['utility', ['ping', 'help']]
 ];
 const COMMAND_HELP = require('./help');
@@ -3343,17 +3686,17 @@ const autoPurgeCache = new Map();
 
 async function getAutoPurge(guildId) {
     if (autoPurgeCache.has(guildId)) return autoPurgeCache.get(guildId);
-    let settings = { commands: !!config.autoPurge, parent: config.autoPurgeParent !== false, correct: !!config.autoCorrect, requireRule: !!config.requireRule, messageLogs: !!config.messageLogs, timezone: config.timezone || null };
+    let settings = { commands: !!config.autoPurge, parent: config.autoPurgeParent !== false, result: !!config.autoPurgeResult, correct: !!config.autoCorrect, requireRule: !!config.requireRule, messageLogs: !!config.messageLogs, banCleanup: config.banCleanup !== false, banCleanupDays: config.banCleanupDays || 7, timezone: config.timezone || null };
     if (process.env.MONGODB_URI) {
         const doc = await Guild.findOne({ guildId }).lean().catch(() => null);
-        if (doc) settings = { commands: !!doc.autoPurge, parent: doc.autoPurgeParent !== false, correct: !!doc.autoCorrect, requireRule: !!doc.requireRule, messageLogs: !!doc.messageLogs, timezone: doc.timezone || null };
+        if (doc) settings = { commands: !!doc.autoPurge, parent: doc.autoPurgeParent !== false, result: !!doc.autoPurgeResult, correct: !!doc.autoCorrect, requireRule: !!doc.requireRule, messageLogs: !!doc.messageLogs, banCleanup: doc.banCleanup !== false, banCleanupDays: doc.banCleanupDays || 7, timezone: doc.timezone || null };
     }
     autoPurgeCache.set(guildId, settings);
     return settings;
 }
 
 async function setAutoPurge(guildId, target, enabled) {
-    const key = target === 'parent' ? 'autoPurgeParent' : target === 'correct' ? 'autoCorrect' : target === 'rule' ? 'requireRule' : target === 'messagelogs' ? 'messageLogs' : target === 'timezone' ? 'timezone' : 'autoPurge';
+    const key = target === 'parent' ? 'autoPurgeParent' : target === 'result' ? 'autoPurgeResult' : target === 'correct' ? 'autoCorrect' : target === 'rule' ? 'requireRule' : target === 'messagelogs' ? 'messageLogs' : target === 'bancleanup' ? 'banCleanup' : target === 'bancleanupdays' ? 'banCleanupDays' : target === 'timezone' ? 'timezone' : 'autoPurge';
     if (process.env.MONGODB_URI) {
         await Guild.findOneAndUpdate({ guildId }, { [key]: enabled }, { upsert: true, new: true });
     } else {
@@ -3365,6 +3708,7 @@ async function setAutoPurge(guildId, target, enabled) {
 }
 
 const messageLogsOn = async (guildId) => (await getAutoPurge(guildId)).messageLogs;
+const snapshotsOn = async (guildId) => { const s = await getAutoPurge(guildId); return s.messageLogs || s.banCleanup; };
 
 async function getPrefix(guildId) {
     if (prefixCache.has(guildId)) return prefixCache.get(guildId);
@@ -3487,6 +3831,71 @@ async function getReplyAuthor(message) {
     return (await getReplyMessage(message))?.author ?? null;
 }
 
+const nameScore = (typed, name) => {
+    const a = String(typed).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    const b = String(name ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (b.startsWith(a)) return a.length >= 3 ? 0.92 : 0.7;
+    if (b.includes(a) && a.length >= 3) return 0.8;
+    return Math.max(0, 1 - editDistance(a, b) / Math.max(a.length, b.length));
+};
+
+async function findSimilarMembers(guild, typed, banned = false) {
+    const pool = new Map();
+    if (banned) {
+        for (const ban of (await guild.bans.fetch().catch(() => new Map())).values()) pool.set(ban.user.id, { user: ban.user, names: [ban.user.username, ban.user.globalName] });
+    } else {
+        const found = await guild.members.search({ query: typed.slice(0, 32), limit: 25 }).catch(() => new Map());
+        for (const m of [...found.values(), ...guild.members.cache.values()]) pool.set(m.id, { user: m.user, names: [m.user.username, m.user.globalName, m.nickname] });
+    }
+    const scored = [];
+    for (const { user, names } of pool.values()) {
+        const score = Math.max(...names.map(n => nameScore(typed, n)));
+        if (score >= 0.6) scored.push({ user, score, label: `**${names[2] || names[1] || user.username}** (@${user.username})`, chosen: `**${names[2] || names[1] || user.username}** (@${user.username} / \`${user.id}\`)` });
+    }
+    scored.sort((x, y) => y.score - x.score);
+    return scored.filter(m => m.score >= scored[0].score - 0.12).slice(0, 5);
+}
+
+async function confirmUser(message, matches, verb = 'using') {
+    const single = matches.length === 1;
+    const row = new ActionRowBuilder().addComponents(single
+        ? [new ButtonBuilder().setCustomId(`suggest_pick:${message.id}:0`).setLabel('yes').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`suggest_no:${message.id}`).setLabel('no').setStyle(ButtonStyle.Secondary)]
+        : [...matches.map((m, i) => new ButtonBuilder().setCustomId(`suggest_pick:${message.id}:${i}`).setLabel(String(i + 1)).setStyle(ButtonStyle.Primary)), new ButtonBuilder().setCustomId(`suggest_no:${message.id}`).setLabel('none').setStyle(ButtonStyle.Secondary)]);
+    const content = single
+        ? `are you perhaps referring to ${matches[0].label}? reply **y** or **n**, or use the buttons.`
+        : `which one did you mean? reply **1** to **${matches.length}**, or **n** to cancel, or use the buttons.\n${matches.map((m, i) => `${i + 1}. ${m.label} / \`${m.user.id}\``).join('\n')}`;
+    const sent = await message.reply({ content, components: [row], allowedMentions: { parse: [], repliedUser: false } }).catch(() => null);
+    if (!sent) return null;
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = (pick, interaction) => {
+            if (settled) return;
+            settled = true;
+            texts.stop('answered');
+            buttons.stop('answered');
+            const edit = { content: pick ? `alright. ${verb} ${pick.chosen}.` : 'no action executed.', components: [], allowedMentions: { parse: [] } };
+            (interaction ? interaction.update(edit) : sent.edit(edit)).catch(() => null);
+            resolve(pick || null);
+        };
+        const asPick = (text) => {
+            const t = text.trim().toLowerCase();
+            if (single && (t === 'y' || t === 'yes')) return matches[0];
+            const n = Number(t);
+            return !single && Number.isInteger(n) && n >= 1 && n <= matches.length ? matches[n - 1] : null;
+        };
+        const texts = message.channel.createMessageCollector({ filter: m => m.author.id === message.author.id && (asPick(m.content) || /^(n|no)$/i.test(m.content.trim())), max: 1, time: 60_000 });
+        texts.on('collect', m => finish(asPick(m.content)));
+        const buttons = sent.createMessageComponentCollector({ time: 60_000 });
+        buttons.on('collect', i => {
+            if (i.user.id !== message.author.id) return i.reply({ content: 'only the moderator who ran the command can answer this.', ephemeral: true }).catch(() => null);
+            finish(i.customId.startsWith('suggest_pick') ? matches[Number(i.customId.split(':')[2])] : null, i);
+        });
+        texts.on('end', (_, reason) => { if (reason === 'time') finish(null); });
+    });
+}
+
 async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false) {
     const args = argText.trim() ? argText.trim().split(/\s+/) : [];
     const values = {};
@@ -3507,13 +3916,18 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
     const replyUser = await getReplyAuthor(message);
     const takeUser = async (i) => {
         const user = await resolvePrefixUser(args[i]);
-        return user ? { user, used: 1 } : { user: replyUser, used: 0 };
+        if (user) return { user, used: 1 };
+        if (!replyUser && !message.__suggest && args[i] && /^[\p{L}\p{N}_.'-]{2,32}$/u.test(args[i]) && !args[i].startsWith('-') && !parseDuration(args[i])) {
+            const hits = await findSimilarMembers(message.guild, args[i], name === 'unban');
+            if (hits.length) message.__suggest = { index: i, matches: hits };
+        }
+        return { user: replyUser, used: 0 };
     };
 
-    if (['ban', 'kick', 'softban', 'mute', 'unmute'].includes(name)) {
+    if (['ban', 'kick', 'softban', 'mute', 'unmute', 'unban'].includes(name)) {
         const { user, used } = await takeUser(0);
         const durationAllowed = name === 'ban' || name === 'mute';
-        if (!user) return fail(`syntax: \`${PREFIX}${name} <user>${durationAllowed ? ' [duration]' : ''}${name === 'ban' ? ' [--urgent]' : ''}${name === 'unmute' ? '' : ' [--rule <id>]'} [reason]\` (or reply to their message)`);
+        if (!user) return fail(`syntax: \`${PREFIX}${name} <user>${durationAllowed ? ' [duration]' : ''}${name === 'ban' ? ' [--urgent]' : ''}${name === 'unmute' || name === 'unban' ? '' : ' [--rule <id>]'} [reason]\` (or reply to their message)`);
         values.user = user;
         let i = used;
         for (let n = 0; n < 4 && args[i]; n++) {
@@ -3526,6 +3940,33 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         values.urgent = values.urgent ?? false;
         values.reason = restAfter(argText, i) || null;
         return { commandName: name, subcommand, values };
+    }
+
+    if (name === 'setnick') {
+        const { user, used } = await takeUser(0);
+        if (!user) return fail(`syntax: \`${PREFIX}setnick <user> <nickname>\` (or reply to their message)`);
+        values.user = user;
+        values.nickname = restAfter(argText, used) || null;
+        return { commandName: 'setnick', subcommand, values };
+    }
+
+    if (name === 'slowmode') {
+        const first = args[0]?.toLowerCase();
+        if (!first) return fail(`syntax: \`${PREFIX}slowmode <time>\` (like \`5s\`, \`10s\`, \`2m\`, or \`off\`), \`${PREFIX}slowmode revert\`, each with an optional #channel`);
+        const channelToken = args.find((a, i) => i > 0 && /^<#\d+>$/.test(a));
+        if (channelToken) values.channel = resolvePrefixChannel(message.guild, channelToken);
+        if (first === 'revert') return { commandName: 'slowmode', subcommand: 'revert', values };
+        values.time = first;
+        return { commandName: 'slowmode', subcommand: 'set', values };
+    }
+
+    if (name === 'sendmessage') {
+        const channel = resolvePrefixChannel(message.guild, args[0]);
+        const text = restAfter(argText, 1);
+        if (!channel || !text) return fail(`syntax: \`${PREFIX}sendmessage #channel <message>\``);
+        values.channel = channel;
+        values.message = text;
+        return { commandName: 'sendmessage', subcommand, values };
     }
 
     if (name === 'lock' || name === 'unlock') {
@@ -3547,6 +3988,17 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
     if (name === 'timezone') {
         if (args.length) values.zone = args.join(' ');
         return { commandName: 'timezone', subcommand, values };
+    }
+
+    if (name === 'bancleanup') {
+        for (const word of args) {
+            const day = word.match(/^(\d{1,2})d?$/i);
+            if (day) values.days = Number(day[1]);
+            else if (ON_OFF[word.toLowerCase()]) values.enabled = ON_OFF[word.toLowerCase()] === 'on';
+            else if (word.toLowerCase() !== 'show') return fail(`syntax: \`${PREFIX}bancleanup\` to show, or \`${PREFIX}bancleanup on|off [days]\` (1 to 30 days)`);
+        }
+        if (values.days !== undefined && (values.days < 1 || values.days > 30)) return fail('days must be between 1 and 30.');
+        return { commandName: 'bancleanup', subcommand, values };
     }
 
     if (name === 'messagelogs') {
@@ -3571,8 +4023,8 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         const target = sub(args[0], AUTOPURGE_TARGETS);
         const state = sub(args[1], ON_OFF);
         if (target.error || state.error) return fail(target.error || state.error);
-        if (!['commands', 'parent'].includes(target.value?.toLowerCase()) || !['on', 'off'].includes(state.value || '')) {
-            return fail(`syntax: \`${PREFIX}autopurge\` to show, or \`${PREFIX}autopurge commands|parent on|off\``);
+        if (!['commands', 'parent', 'result'].includes(target.value?.toLowerCase()) || !['on', 'off'].includes(state.value || '')) {
+            return fail(`syntax: \`${PREFIX}autopurge\` to show, or \`${PREFIX}autopurge commands|parent|result on|off\``);
         }
         values.target = target.value.toLowerCase();
         values.enabled = state.value === 'on';
@@ -3703,6 +4155,7 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'rule' || commandName === 'alias') return subcommand === 'list';
     if (commandName === 'prefix') return !subcommand || subcommand === 'show';
     if (commandName === 'autopurge' || commandName === 'autocorrect' || commandName === 'requirerule' || commandName === 'messagelogs') return values.enabled === undefined || values.enabled === null;
+    if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
     return false;
 }
@@ -3776,7 +4229,12 @@ function createPrefixInteraction(message, commandName, subcommand, values) {
         async cleanup() {
             clearTimeout(placeholderTimer);
             if (isReadOnlyCommand(commandName, subcommand, values)) return;
-            if (!(await getAutoPurge(message.guildId).catch(() => ({ commands: false }))).commands) return;
+            const autoPurge = await getAutoPurge(message.guildId).catch(() => ({ commands: false }));
+            if (autoPurge.result && (commandName === 'purge' || commandName === 'mark / purge range')) {
+                const reply = sent;
+                setTimeout(() => reply?.delete().catch(() => null), 5000).unref();
+            }
+            if (!autoPurge.commands) return;
             await Promise.all([sent?.delete().catch(() => null), message.delete().catch(() => null)]);
         }
     };
@@ -3921,8 +4379,18 @@ async function runPrefixMessage(message) {
         return interaction.cleanup();
     }
 
-    const parsed = await parsePrefixCommand(message, command, argText, PREFIX, settings.correct);
+    let parsed = await parsePrefixCommand(message, command, argText, PREFIX, settings.correct);
     if (!parsed) return;
+    if (parsed.error && message.__suggest) {
+        const hint = message.__suggest;
+        message.__suggest = null;
+        const chosen = await confirmUser(message, hint.matches, { ban: 'banning', unban: 'unbanning', kick: 'kicking', softban: 'softbanning', mute: 'muting', unmute: 'unmuting' }[command] ?? 'using');
+        if (!chosen) return;
+        const words = argText.trim().split(/\s+/);
+        words[hint.index] = chosen.user.id;
+        parsed = await parsePrefixCommand(message, command, words.join(' '), PREFIX, settings.correct);
+        if (!parsed) return;
+    }
     if (parsed.error) return reply(parsed.error);
 
     const fixes = (message.__corrections || []).filter((f, i, all) => all.findIndex(g => g[0] === f[0] && g[1] === f[1]) === i);
@@ -4221,10 +4689,12 @@ client.on(Events.MessageDelete, safe(async (message) => {
     const forget = () => forgetCachedMessages(message.guildId, [message.id]);
     if (suppressedDeletes.delete(message.id)) return forget();
     if (message.author?.bot) return forget();
+    if (message.author && urgentActive(message.guildId, message.author.id)) return forget();
     if (!(await messageLogsOn(message.guildId))) return;
 
     const stored = (!message.author || message.partial || message.content == null) ? await lookupCachedMessage(message.guildId, message.id).catch(() => null) : null;
     const author = message.author ?? (stored ? { id: stored.author_id, username: stored.author_name } : null);
+    if (author && urgentActive(message.guildId, author.id)) return forget();
     const content = message.content ?? stored?.content;
     const files = message.attachments ? Array.from(message.attachments.values()).map(describeAttachmentLink).join('\n') : (stored?.attachments || []).map(a => describeFile(a.name, a.type, a.size)).join('\n');
 
@@ -4258,7 +4728,7 @@ client.on(Events.MessageDelete, safe(async (message) => {
 }));
 client.on(Events.MessageBulkDelete, safe(async (messages, channel) => {
     const allIds = [...messages.values()].map(m => m.id);
-    const unsuppressed = messages.filter(m => !suppressedDeletes.delete(m.id));
+    const unsuppressed = messages.filter(m => !suppressedDeletes.delete(m.id) && !(m.author && urgentActive(channel.guild.id, m.author.id)));
     if (unsuppressed.size === 0) return forgetCachedMessages(channel.guild.id, allIds);
     if (!(await messageLogsOn(channel.guild.id))) return;
 

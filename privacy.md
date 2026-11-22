@@ -14,7 +14,7 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 
 **Infractions** (per server): the user ID of the person, the user ID of the moderator, the rule cited and its text at the time, the reason, the action type (manual entry, mute, kick, softban or ban), duration and expiry, status, timestamps, the text of the message a moderator cited (if one was cited), and links to any evidence a moderator chose to archive in the server's own log channel.
 
-**Message index** (7 days): message ID, channel ID, author ID, whether it had attachments, and the time sent. It contains no message text. It exists so a ban transcript can be built from a user's recent messages.
+**Message index** (7 days): message ID, channel ID, author ID, whether it had attachments, and the time sent. It contains no message text. It exists so a ban transcript can be built from a user's recent messages. With ban cleanup on (the default), a ban or softban also reads that user's recent channel history, up to the days the server set (7 by default), builds a transcript in the server's log channel and deletes those messages. This reading is not stored.
 
 **Message cache** (72 hours): the text of recent messages, the author, and attachment details, excluding messages from bots. It exists so edit and delete logs still show what was said after a restart. Entries older than 72 hours are removed automatically.
 

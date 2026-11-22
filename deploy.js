@@ -68,7 +68,8 @@ const commands = [
         .addStringOption(o => o.setName("target").setDescription("which auto-purge")
             .addChoices(
                 { name: "commands (the prefix command and the bot's reply)", value: "commands" },
-                { name: "parent (the message being cited or infractioned)", value: "parent" }
+                { name: "parent (the message being cited or infractioned)", value: "parent" },
+                { name: "result (the purge result reply, like purged 2 messages)", value: "result" }
             ))
         .addBooleanOption(o => o.setName("enabled").setDescription("turn it on or off")),
 
@@ -95,6 +96,13 @@ const commands = [
         .setDescription(help.messagelogs.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
         .addBooleanOption(o => o.setName("enabled").setDescription("on: log edited and deleted messages and build ban transcripts (no option shows the state)")),
+
+    new SlashCommandBuilder()
+        .setName("bancleanup")
+        .setDescription(help.bancleanup.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addBooleanOption(o => o.setName("enabled").setDescription("on (default): build the transcript, then delete their messages (no option shows the state)"))
+        .addIntegerOption(o => o.setName("days").setDescription("how far back to look and delete, 1 to 30 (default 7)").setMinValue(1).setMaxValue(30)),
 
     new SlashCommandBuilder()
         .setName("alias")
@@ -210,6 +218,37 @@ const commands = [
         .addUserOption(o => o.setName("user").setDescription("the user to mute").setRequired(true))
         .addStringOption(o => o.setName("duration").setDescription("how long (30m, 12h, 7d, permanent); defaults to permanent").setAutocomplete(true))
         .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or leave blank for custom").setAutocomplete(true))
+        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
+
+    new SlashCommandBuilder()
+        .setName("setnick")
+        .setDescription(help.setnick.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames)
+        .addUserOption(o => o.setName("user").setDescription("the member").setRequired(true))
+        .addStringOption(o => o.setName("nickname").setDescription("the new nickname (up to 32 characters, or reset)").setMaxLength(32)),
+
+    new SlashCommandBuilder()
+        .setName("slowmode")
+        .setDescription(help.slowmode.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addSubcommand(sub => sub.setName("set").setDescription("set a channel's slowmode")
+            .addStringOption(o => o.setName("time").setDescription("like 5s, 10s, 2m, 1h (up to 6h), or off").setRequired(true))
+            .addChannelOption(o => o.setName("channel").setDescription("defaults to this channel")))
+        .addSubcommand(sub => sub.setName("revert").setDescription("go back to the slowmode before the last change")
+            .addChannelOption(o => o.setName("channel").setDescription("defaults to this channel"))),
+
+    new SlashCommandBuilder()
+        .setName("sendmessage")
+        .setDescription(help.sendmessage.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addChannelOption(o => o.setName("channel").setDescription("where to send it").setRequired(true))
+        .addStringOption(o => o.setName("message").setDescription("what to send").setRequired(true).setMaxLength(2000)),
+
+    new SlashCommandBuilder()
+        .setName("unban")
+        .setDescription(help.unban.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+        .addUserOption(o => o.setName("user").setDescription("the user to unban (an id works too)").setRequired(true))
         .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
 
     new SlashCommandBuilder()

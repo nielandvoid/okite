@@ -2,7 +2,7 @@ module.exports = {
     ban: {
         summary: 'ban a user and keep a transcript of their last 7 days',
         syntax: 'ban <user> [duration] [--urgent] [--rule <id>] [reason]',
-        desc: 'bans a user.\ntheir last 7-days\' messages aren\'t deleted instantaneously. a transcript (.txt) of them is posted to the citation-logs, then the staff is asked whether to archive the attachments (option validity: 24h), and the messages are deleted after that. specify [duration] for tempban. reply to a message to skip the <user>. `--urgent` is for potentially illegal / heavily problematic content: the last 7 days are purged instantaneously and nothing is saved.',
+        desc: 'bans a user.\nwith ban cleanup on (the default, see `bancleanup`) a transcript (.txt and .md) of their messages from every channel is posted to the log channel, their attachments are archived there, and the messages are deleted from chat. specify [duration] for tempban. reply to a message to skip the <user>. `--urgent` is for potentially illegal / heavily problematic content: the ban lands first, their newest messages are deleted at once and the rest of the window right after, and nothing is saved or logged.',
         perm: 'Ban Members'
     },
     kick: {
@@ -22,6 +22,30 @@ module.exports = {
         syntax: 'mute <user> [duration] [--rule <id>] [reason]',
         desc: 'mutes a user.\ndiscord\'s timeout is applied for [duration], or until lifted when none is given. a timeout can\'t exceed 28 days, so it is re-applied until the duration ends. aliases: `m`, `timeout`.',
         perm: 'Timeout Members'
+    },
+    unban: {
+        summary: 'lift a ban',
+        syntax: 'unban <user> [reason]',
+        desc: 'unbans a user by mention or id, and closes their open ban infraction so a timed ban stops counting. refuses when they aren\'t banned. alias: `pardon`.',
+        perm: 'Ban Members'
+    },
+    setnick: {
+        summary: 'change a member\'s nickname',
+        syntax: 'setnick <user> <nickname>',
+        desc: 'sets a member\'s server nickname. with no nickname it changes nothing. `reset` clears it. the user can be a mention, an id, or a name okite will confirm. reply to their message to skip <user>. alias: `nick`.',
+        perm: 'Manage Nicknames'
+    },
+    slowmode: {
+        summary: 'set or revert a channel\'s slowmode',
+        syntax: 'slowmode <time> [#channel]\nslowmode revert [#channel]',
+        desc: 'sets slowmode to a time like `5s`, `10s`, `2m`, `1h` (up to 6 hours), or `off`. `revert` goes back to the slowmode the channel had before the last change, or to none if okite has no record of one. the previous value is kept in memory until okite restarts. [#channel] defaults to the current one. alias: `slow`.',
+        perm: 'Manage Channels'
+    },
+    sendmessage: {
+        summary: 'send a message as okite in a channel',
+        syntax: 'sendmessage #channel <message>',
+        desc: 'sends a message as the bot. you need to be able to send messages in that channel yourself. mentions in it do not ping. every use is written to the moderation log. alias: `say`.',
+        perm: 'Manage Messages'
     },
     unmute: {
         summary: 'lift a user\'s timeout',
@@ -84,9 +108,9 @@ module.exports = {
         perm: 'Manage Channels'
     },
     autopurge: {
-        summary: 'show or change the two auto-purges',
-        syntax: 'autopurge\nautopurge commands on|off\nautopurge parent on|off',
-        desc: 'auto-deletes after use.\ntwo per-server switches. `commands` deletes the command and its reply once it has run, except for commands that only show information. `parent` deletes the cited message once it has been logged.',
+        summary: 'show or change the auto-purges',
+        syntax: 'autopurge\nautopurge commands on|off\nautopurge parent on|off\nautopurge result on|off',
+        desc: 'auto-deletes after use.\nthree per-server switches. `commands` deletes the command and its reply once it has run, except for commands that only show information. `parent` deletes the cited message once it has been logged. `result` deletes only the bot\'s "purged N messages." reply, about 5 seconds after a `!purge`, and works on its own.',
         perm: 'Manage Channels'
     },
     autocorrect: {
@@ -99,6 +123,12 @@ module.exports = {
         summary: 'require a rule for every moderation action',
         syntax: 'requirerule\nrequirerule on|off',
         desc: 'makes a rule compulsory.\nwhen on, `ban`, `kick`, `softban`, `mute` and `infraction add` need a rule id, or `custom` with a reason. when off (the default), the rule is optional and none is recorded as custom. per server.',
+        perm: 'Manage Channels'
+    },
+    bancleanup: {
+        summary: 'clear a banned user\'s messages once their transcript is built',
+        syntax: 'bancleanup\nbancleanup on|off [days]',
+        desc: '**on by default.** when on, `ban` and `softban` build a transcript and archive the attachments in the log channel from the last [days] days (7 by default, up to 30) of the user\'s messages in every channel, then delete those messages from chat right away. the log channel gets a card with **archive** and **erase** buttons, for anything that should not have been saved. when off, their messages stay up until staff answer the save prompt. `ban --urgent` is unchanged and deletes without saving anything.',
         perm: 'Manage Channels'
     },
     messagelogs: {
