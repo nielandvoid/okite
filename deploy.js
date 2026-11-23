@@ -271,7 +271,10 @@ const commands = [
         .setDescription(help.sendmessage.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
         .addChannelOption(o => o.setName("channel").setDescription("where to send it").setRequired(true))
-        .addStringOption(o => o.setName("message").setDescription("what to send").setRequired(true).setMaxLength(2000)),
+        .addStringOption(o => o.setName("message").setDescription("what to send (optional when a file is attached)").setMaxLength(2000))
+        .addAttachmentOption(o => o.setName("file").setDescription("a picture, video or file to send along"))
+        .addAttachmentOption(o => o.setName("file2").setDescription("another file"))
+        .addAttachmentOption(o => o.setName("file3").setDescription("another file")),
 
     new SlashCommandBuilder()
         .setName("unban")

@@ -43,8 +43,8 @@ module.exports = {
     },
     sendmessage: {
         summary: 'send a message as okite in a channel',
-        syntax: 'sendmessage #channel <message>',
-        desc: 'sends a message as the bot. you need to be able to send messages in that channel yourself. mentions in it do not ping. every use is written to the moderation log. alias: `say`.',
+        syntax: 'sendmessage #channel [message]',
+        desc: 'sends a message as the bot. you need to be able to send messages in that channel yourself. mentions in it do not ping. every use is written to the moderation log. alias: `say`.\nto relay pictures, videos or other files, attach them to your own message (up to 10 with the prefix form, 3 with `/sendmessage`); okite uploads them again in the channel with your text, and the text is optional when there is a file. you need to be able to attach files there yourself, and the total has to fit the server\'s upload limit.',
         perm: 'Manage Messages'
     },
     unmute: {

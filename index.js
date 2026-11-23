@@ -1475,6 +1475,7 @@ function summarise(rows) {
 const BAN_PROMPT_HOURS = Number(process.env.BAN_PROMPT_HOURS) || 24;
 const INDEX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 24 * 1024 * 1024;
+const RELAY_FILE_SLOTS = ['file', 'file2', 'file3', 'file4', 'file5', 'file6', 'file7', 'file8', 'file9', 'file10'];
 const botBans = new Set();
 const indexBuffer = [];
 let indexFlushing = false;
@@ -3278,13 +3279,28 @@ async function handleInteraction(interaction) {
             if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
             const channel = options.getChannel('channel');
             const content = options.getString('message');
-            if (!channel?.isTextBased?.() || !content?.trim()) return interaction.reply({ content: 'give a text channel and a message.', ephemeral: true });
-            if (!channel.permissionsFor(interaction.member)?.has(PermissionFlagsBits.SendMessages)) {
+            const files = RELAY_FILE_SLOTS.map(slot => options.getAttachment(slot)).filter(Boolean);
+            if (!channel?.isTextBased?.() || (!content?.trim() && !files.length)) return interaction.reply({ content: 'give a text channel and a message or a file.', ephemeral: true });
+            const theirs = channel.permissionsFor(interaction.member);
+            if (!theirs?.has(PermissionFlagsBits.SendMessages)) {
                 return interaction.reply({ content: 'you can\'t send messages in that channel yourself, so okite won\'t either.', ephemeral: true });
             }
+            if (files.length && !theirs.has(PermissionFlagsBits.AttachFiles)) {
+                return interaction.reply({ content: 'you can\'t attach files in that channel yourself, so okite won\'t either.', ephemeral: true });
+            }
+            const limit = ({ 2: 50, 3: 100 }[interaction.guild.premiumTier] ?? 10) * 1024 * 1024;
+            const total = files.reduce((n, f) => n + (f.size || 0), 0);
+            if (total > limit) return interaction.reply({ content: `those files add up to ${formatSize(total)}, over this server's upload limit of ${formatSize(limit)}.`, ephemeral: true });
+            if (files.some(f => !/^(cdn\.discordapp\.com|media\.discordapp\.net)$/.test(new URL(f.url).hostname))) return interaction.reply({ content: 'those attachments are not on discord\'s cdn, so okite won\'t relay them.', ephemeral: true });
+            await interaction.deferReply({ ephemeral: true });
             let sent;
-            try { sent = await channel.send({ content: content.slice(0, 2000), allowedMentions: { parse: [] } }); }
-            catch (err) { return interaction.reply({ content: `couldn't send there: ${err.message}`, ephemeral: true }); }
+            try {
+                sent = await channel.send({
+                    content: content?.trim() ? content.slice(0, 2000) : undefined,
+                    files: files.map(f => ({ attachment: f.url, name: f.name, description: f.description ?? undefined })),
+                    allowedMentions: { parse: [] }
+                });
+            } catch (err) { return interaction.editReply(`couldn't send there: ${err.message}`); }
             logInBackground(interaction.guild, {
                 title: 'message sent by okite',
                 kind: 'moderation',
@@ -3292,11 +3308,12 @@ async function handleInteraction(interaction) {
                 fields: [
                     { name: 'channel', value: `<#${channel.id}>`, inline: true },
                     { name: 'moderator', value: who(interaction.user), inline: true },
-                    { name: 'message', value: clip(content, 1000) },
+                    { name: 'message', value: content ? clip(content, 1000) : '' },
+                    { name: 'files', value: files.map(describeAttachment).join('\n') },
                     { name: 'link', value: sent.url }
                 ]
             });
-            return interaction.reply({ content: `sent in <#${channel.id}>: ${sent.url}`, ephemeral: true });
+            return interaction.editReply(`sent in <#${channel.id}>${files.length ? ` with ${files.length} file${files.length === 1 ? '' : 's'}` : ''}: ${sent.url}`);
         }
 
         if (commandName === 'lock' || commandName === 'unlock') {
@@ -4897,9 +4914,11 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
     if (name === 'sendmessage') {
         const channel = resolvePrefixChannel(message.guild, args[0]);
         const text = restAfter(argText, 1);
-        if (!channel || !text) return fail(`syntax: \`${PREFIX}sendmessage #channel <message>\``);
+        const files = [...message.attachments.values()].slice(0, RELAY_FILE_SLOTS.length);
+        if (!channel || (!text && !files.length)) return fail(`syntax: \`${PREFIX}sendmessage #channel [message]\` (attach pictures, videos or files to your message to relay them)`);
         values.channel = channel;
-        values.message = text;
+        values.message = text || null;
+        files.forEach((file, i) => { values[RELAY_FILE_SLOTS[i]] = file; });
         return { commandName: 'sendmessage', subcommand, values };
     }
 
@@ -5157,7 +5176,8 @@ function createPrefixInteraction(message, commandName, subcommand, values) {
             getString: (n) => values[n] ?? null,
             getInteger: (n) => values[n] ?? null,
             getBoolean: (n) => values[n] ?? null,
-            getChannel: (n) => values[n] ?? null
+            getChannel: (n) => values[n] ?? null,
+            getAttachment: (n) => values[n] ?? null
         },
         isChatInputCommand: () => true,
         isMessageContextMenuCommand: () => false,
