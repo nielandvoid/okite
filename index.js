@@ -4779,6 +4779,43 @@ async function confirmUser(message, matches, verb = 'using') {
     });
 }
 
+async function pickRule(message, rules, typed) {
+    const picks = rules.slice(0, 9);
+    const buttons = [
+        ...picks.map((r, i) => new ButtonBuilder().setCustomId(`suggest_pick:${message.id}:${i}`).setLabel(String(i + 1)).setStyle(ButtonStyle.Primary)),
+        new ButtonBuilder().setCustomId(`suggest_no:${message.id}`).setLabel('none').setStyle(ButtonStyle.Secondary)
+    ];
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 5) rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+    const content = `\`${typed}\` is a section. which rule did you mean? reply **1** to **${picks.length}**, **n** to cancel, or use the buttons.\n${picks.map((r, i) => `${i + 1}. \`${r.id}\` ${plainText(stripRulePrefix(r.label) || r.label)}`).join('\n')}`;
+    const sent = await message.reply({ content, components: rows, allowedMentions: { parse: [] } }).catch(() => null);
+    if (!sent) return null;
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = (rule, interaction) => {
+            if (settled) return;
+            settled = true;
+            texts.stop('answered');
+            pressed.stop('answered');
+            const edit = { content: rule ? `alright. citing \`${rule.id}\`.` : 'no action executed.', components: [], allowedMentions: { parse: [] } };
+            (interaction ? interaction.update(edit) : sent.edit(edit)).catch(() => null);
+            resolve(rule ? { rule, promptMessage: sent } : null);
+        };
+        const asPick = (text) => {
+            const n = Number(text.trim());
+            return Number.isInteger(n) && n >= 1 && n <= picks.length ? picks[n - 1] : null;
+        };
+        const texts = message.channel.createMessageCollector({ filter: m => m.author.id === message.author.id && (asPick(m.content) || /^(n|no)$/i.test(m.content.trim())), max: 1, time: 60_000 });
+        texts.on('collect', m => finish(asPick(m.content)));
+        const pressed = sent.createMessageComponentCollector({ time: 60_000 });
+        pressed.on('collect', i => {
+            if (i.user.id !== message.author.id) return i.reply({ content: 'only the moderator who ran the command can answer this.', ephemeral: true }).catch(() => null);
+            finish(i.customId.startsWith('suggest_pick') ? picks[Number(i.customId.split(':')[2])] : null, i);
+        });
+        texts.on('end', (_, reason) => { if (reason === 'time') finish(null); });
+    });
+}
+
 async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false) {
     const noteCapable = ['ban', 'kick', 'softban', 'mute', 'unmute', 'infraction'].includes(name);
     const mnMatch = noteCapable ? argText.match(/(^|\s)--(?:mn|modnote)(?:\s+([\s\S]*))?$/i) : null;
@@ -5259,8 +5296,13 @@ async function runPrefixMessage(message) {
             ruleId = 'custom';
             if (!text) return reply(`syntax: \`${PREFIX}cite custom <reason> [--silent] [--mn <note>]\``);
         } else {
-            const { rule, section } = matchRule(await getServerRules(message.guildId), first);
-            if (section) return reply(`\`${first}\` is a section, not one rule. pick one: ${section.map(r => `\`${r.id}\``).join(', ')}`);
+            let { rule, section } = matchRule(await getServerRules(message.guildId), first);
+            if (section) {
+                const picked = await pickRule(message, section, first);
+                if (!picked) return;
+                rule = picked.rule;
+                message.__promptMessage = picked.promptMessage;
+            }
             if (!rule) return reply(`rule \`${first}\` not found. try \`/rule list\`.`);
             text = rule.text;
             ruleId = rule.id;
