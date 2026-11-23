@@ -4251,6 +4251,8 @@ async function handleInteraction(interaction) {
 }
 
 client.rest.on('rateLimited', (info) => console.warn(`rate limited: ${info.method} ${info.route} for ${info.timeToReset}ms (global: ${info.global}, limit: ${info.limit})`));
+client.rest.on('restDebug', (info) => { if (/webhooks|interactions/i.test(info)) console.log(`rest debug: ${String(info).replace(/[A-Za-z0-9_.-]{40,}/g, '<token>')}`); });
+client.rest.on('response', (request, response) => { if (/\/(webhooks|interactions)\//.test(request.route)) console.log(`rest response: ${request.method} ${request.route} ${response.status}`); });
 client.rest.on('invalidRequestWarning', (info) => console.warn(`invalid requests: ${info.count} in this window, resets in ${info.remainingTime}ms`));
 
 client.on(Events.InteractionCreate, (interaction) => {
