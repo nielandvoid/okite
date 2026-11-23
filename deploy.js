@@ -98,6 +98,16 @@ const commands = [
         .addBooleanOption(o => o.setName("enabled").setDescription("on: log edited and deleted messages and build ban transcripts (no option shows the state)")),
 
     new SlashCommandBuilder()
+        .setName("userdms")
+        .setDescription(help.userdms.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addBooleanOption(o => o.setName("enabled").setDescription("on: DM users when they are banned, kicked, muted, warned or cited (no option shows the state)"))
+        .addStringOption(o => o.setName("action").setDescription("an action to turn the DM on or off for (use with send)")
+            .addChoices({ name: "ban (includes softban)", value: "ban" }, { name: "kick", value: "kick" }, { name: "mute", value: "mute" }, { name: "unmute (includes a mute ending)", value: "unmute" }, { name: "warn", value: "warn" }, { name: "cite", value: "cite" }, { name: "void or delete an infraction", value: "void" }))
+        .addBooleanOption(o => o.setName("send").setDescription("whether that action sends a DM (use with action)"))
+        .addBooleanOption(o => o.setName("show_moderator").setDescription("show the moderator's name in the DM (off by default)")),
+
+    new SlashCommandBuilder()
         .setName("bancleanup")
         .setDescription(help.bancleanup.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
@@ -189,7 +199,9 @@ const commands = [
         .addStringOption(o => o.setName("duration").setDescription("how long (7d, 12h, permanent); defaults to permanent").setAutocomplete(true))
         .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or leave blank for custom").setAutocomplete(true))
         .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400))
-        .addBooleanOption(o => o.setName("urgent").setDescription("illegal content: delete their last 7 days now, save nothing")),
+        .addBooleanOption(o => o.setName("urgent").setDescription("illegal content: delete their last 7 days now, save nothing"))
+        .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+        .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500)),
 
     new SlashCommandBuilder()
         .setName("purge")
@@ -212,7 +224,9 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
         .addUserOption(o => o.setName("user").setDescription("the user to kick").setRequired(true))
         .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or leave blank for custom").setAutocomplete(true))
-        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
+        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400))
+        .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+        .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500)),
 
     new SlashCommandBuilder()
         .setName("softban")
@@ -220,7 +234,9 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
         .addUserOption(o => o.setName("user").setDescription("the user to softban").setRequired(true))
         .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or leave blank for custom").setAutocomplete(true))
-        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
+        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400))
+        .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+        .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500)),
 
     new SlashCommandBuilder()
         .setName("mute")
@@ -229,7 +245,9 @@ const commands = [
         .addUserOption(o => o.setName("user").setDescription("the user to mute").setRequired(true))
         .addStringOption(o => o.setName("duration").setDescription("how long (30m, 12h, 7d, permanent); defaults to permanent").setAutocomplete(true))
         .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or leave blank for custom").setAutocomplete(true))
-        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
+        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400))
+        .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+        .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500)),
 
     new SlashCommandBuilder()
         .setName("setnick")
@@ -267,7 +285,9 @@ const commands = [
         .setDescription(help.unmute.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
         .addUserOption(o => o.setName("user").setDescription("the user to unmute").setRequired(true))
-        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400)),
+        .addStringOption(o => o.setName("reason").setDescription("why").setMaxLength(400))
+        .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+        .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500)),
 
     new SlashCommandBuilder()
         .setName("infraction")
@@ -299,6 +319,8 @@ const commands = [
                .addStringOption(o => o.setName("rule").setDescription("the rule that was broken, or custom (optional unless the server requires one)").setAutocomplete(true))
                .addStringOption(o => o.setName("duration").setDescription("how long it lasts (7d, 12h, permanent); defaults to permanent").setAutocomplete(true))
                .addStringOption(o => o.setName("reason").setDescription("what happened (defaults to not specified)").setMaxLength(1000))
+               .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this warning"))
+               .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500))
         )
         .addSubcommand(sub =>
             sub.setName("edit")
@@ -311,6 +333,8 @@ const commands = [
                .setDescription("mark an infraction as void (kept on record, not counted)")
                .addIntegerOption(o => o.setName("id").setDescription("infraction number").setAutocomplete(true).setRequired(true))
                .addStringOption(o => o.setName("reason").setDescription("why it's being voided").setRequired(true).setMaxLength(500))
+               .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+               .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500))
         )
         .addSubcommand(sub =>
             sub.setName("restore")
@@ -321,6 +345,8 @@ const commands = [
             sub.setName("delete")
                .setDescription("delete an infraction for good (written to the log first)")
                .addIntegerOption(o => o.setName("id").setDescription("infraction number").setAutocomplete(true).setRequired(true))
+               .addBooleanOption(o => o.setName("silent").setDescription("skip the DM to the user for this action"))
+               .addStringOption(o => o.setName("modnote").setDescription("a note for the user, shown in their DM (put it last on prefix commands: --mn or --modnote)").setMaxLength(500))
         ),
 
     new SlashCommandBuilder()

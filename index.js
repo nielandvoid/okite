@@ -104,7 +104,7 @@ try {
 
 const suppressedDeletes = new Set();
 
-const COLORS = { brand: 0xf1ede4, info: 0x6fa8ff, action: 0xffe27a, danger: 0xff8b9a, good: 0x7ee8a8, muted: 0xc49bff };
+const COLORS = { brand: 0xf1ede4, info: 0x6fa8ff, action: 0xffe27a, danger: 0xff8b9a, good: 0x7ee8a8, muted: 0xc49bff, deepred: 0xe5484d, periwinkle: 0x8ea2ff, lime: 0xb6e87a };
 
 const LOG_KINDS = {
     general: 'logChannelId',
@@ -299,16 +299,16 @@ const MESSAGE_TEXT_BUDGET = 3800;
 const PLACEHOLDER_REASONS = new Set(['not specified', 'no reason given', 'banned (no reason given)']);
 
 // log layout: title, details, content, files, footer
-function renderLogContainer({ title, color = COLORS.info, description, fields = [], transcriptNames = [], media = [], attached = [] }) {
+function renderLogContainer({ title, color = COLORS.info, description, fields = [], transcriptNames = [], media = [], attached = [], icon, plainTitle = false }) {
     const valid = fields.filter(f => f && f.value !== undefined && f.value !== null && f.value !== '');
-    const isMain = (f) => f.code || (String(f.name).toLowerCase() === 'reason' && !PLACEHOLDER_REASONS.has(String(f.value).toLowerCase()));
+    const isMain = (f) => !f.plain && (f.code || (String(f.name).toLowerCase() === 'reason' && !PLACEHOLDER_REASONS.has(String(f.value).toLowerCase())));
     const isShort = (f) => !isMain(f) && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
     const sections = valid.filter(f => !isShort(f)).map(f => ({ label: sentenceCase(String(f.name)), value: String(f.value), code: isMain(f), quote: !!f.quote, paint: f.paint, plain: !!f.plain }));
 
     const person = valid.find(f => AVATAR_FIELDS.includes(String(f.name).toLowerCase()) && /<@!?(\d+)>/.test(String(f.value)));
     const id = person && String(person.value).match(/<@!?(\d+)>/)[1];
-    const avatar = (id && client.users.cache.get(id)?.displayAvatarURL?.()) || okiteIcon();
+    const avatar = icon || (id && client.users.cache.get(id)?.displayAvatarURL?.()) || okiteIcon();
 
     const mod = valid.find(f => String(f.name).toLowerCase() === 'moderator' && /<@!?(\d+)>/.test(String(f.value)));
     let by = '';
@@ -319,8 +319,8 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     }
     const footer = `-# ${by}<t:${Math.floor(Date.now() / 1000)}:f>`;
 
-    const head = [`## ${sentenceCase(title).slice(0, 200)}`, description, quoted.join('\n')].filter(Boolean).join('\n');
-    const render = (sec) => (sec.code ? `**${sec.label}**\n${sec.paint ? codeBlock(sec.paint(sec.text), 'ansi') : codeBlock(sec.text)}` : `${sec.plain ? sec.label : `**${sec.label}**`}\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
+    const head = [plainTitle ? title.slice(0, 200) : `## ${sentenceCase(title).slice(0, 200)}`, description, quoted.join('\n')].filter(Boolean).join('\n');
+    const render = (sec) => (sec.code ? `${sec.plain ? sec.label : `**${sec.label}**`}\n${sec.paint ? codeBlock(sec.paint(sec.text), 'ansi') : codeBlock(sec.text)}` : `${sec.plain ? sec.label : `**${sec.label}**`}\n${sec.quote ? sec.text.split('\n').map(l => `> ${l}`).join('\n') : sec.text}`);
     const parts = sections.map(sec => ({ ...sec, text: sec.value }));
     const total = (h) => h.length + footer.length + parts.reduce((n, p) => n + render(p).length, 0);
     let headText = head;
@@ -782,15 +782,25 @@ async function deleteInfraction(interaction, id) {
         new ButtonBuilder().setCustomId('infdel_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
     );
     const asked = await interaction.editReply({
-        content: `delete infraction **#${id}** (${type} for <@${row.target_user_id}>: ${clip(String(text || 'not specified').replace(/\s+/g, ' '), 150)})?\nirreversible - infraction can't be restored; although it does get logged${open ? '\nthe ban / mute stays untouched; purges only the record' : ''}`,
+        content: `delete infraction **#${id}** (${type} for <@${row.target_user_id}>: ${clip(String(text || 'not specified').replace(/\s+/g, ' '), 150)})?\nirreversible - infraction can't be restored; although it does get logged${open ? '\nthe ban / mute stays untouched; purges only the record' : ''}\nreply **y** or **n**, or use the buttons.`,
         components: [buttons],
         allowedMentions: { parse: [] }
     });
-    const answer = await asked.awaitMessageComponent({ filter: i => i.user.id === interaction.user.id, time: 30000 }).catch(() => null);
-    if (!answer || answer.customId === 'infdel_cancel') {
-        return interaction.editReply({ content: answer ? 'cancelled.' : 'confirmation timed out, nothing deleted.', components: [] });
-    }
-    await answer.update({ content: 'deleting…', components: [] });
+    const decision = await new Promise(resolve => {
+        const typed = interaction.channel.createMessageCollector({ filter: m => m.author.id === interaction.user.id && /^(y|yes|n|no)$/i.test(m.content.trim()), max: 1, time: 30000 });
+        const pressed = asked.createMessageComponentCollector({ filter: i => i.user.id === interaction.user.id, max: 1, time: 30000 });
+        const settle = (value) => {
+            resolve(value);
+            typed.stop('decided');
+            pressed.stop('decided');
+        };
+        pressed.on('collect', i => settle({ yes: i.customId === 'infdel_confirm', component: i }));
+        typed.on('collect', m => settle({ yes: /^y/i.test(m.content.trim()), component: null }));
+        pressed.on('end', (_, reason) => { if (reason === 'time') settle(null); });
+    });
+    const finish = (content) => (decision?.component ? decision.component.update({ content, components: [] }) : interaction.editReply({ content, components: [] }));
+    if (!decision || !decision.yes) return finish(decision ? 'cancelled.' : 'confirmation timed out, nothing deleted.');
+    await finish('deleting…');
 
     const logged = await sendLog(guild, {
         title: `infraction #${id} deleted`,
@@ -816,7 +826,9 @@ async function deleteInfraction(interaction, id) {
         console.error('infraction delete error:', error);
         return interaction.editReply({ content: 'the delete failed, the infraction is still there.', components: [] });
     }
-    return interaction.editReply({ content: `infraction **#${id}** deleted.`, components: [] });
+    const user = await client.users.fetch(row.target_user_id).catch(() => null);
+    const dm = await dmUser({ modNote: interaction.options?.getString?.('modnote') ?? null, guild, user, action: 'delete', original: text, infraction: row, moderator: interaction.user, silent: interaction.options?.getBoolean?.('silent') ?? false });
+    return interaction.editReply({ content: `infraction **#${id}** deleted.${dmNote(dm)}`, components: [] });
 }
 
 async function setInfractionVoid(interaction, id, voiding, reason) {
@@ -845,7 +857,13 @@ async function setInfractionVoid(interaction, id, voiding, reason) {
             { name: 'reason', value: reason }
         ]
     });
-    return interaction.editReply(`infraction **#${id}** ${voiding ? 'voided' : 'restored'}.`);
+    let dm = 'off';
+    if (voiding) {
+        const user = await client.users.fetch(row.target_user_id).catch(() => null);
+        const custom = !row.rule_id || row.rule_id === 'custom';
+        dm = await dmUser({ modNote: interaction.options?.getString?.('modnote') ?? null, guild: interaction.guild, user, action: 'void', reason, original: custom ? row.rule_text_snapshot : (row.reason && row.reason !== 'not specified' ? row.reason : row.rule_text_snapshot), infraction: row, moderator: interaction.user, silent: interaction.options?.getBoolean?.('silent') ?? false });
+    }
+    return interaction.editReply(`infraction **#${id}** ${voiding ? 'voided' : 'restored'}.${dmNote(dm)}`);
 }
 
 const botKicks = new Set();
@@ -904,6 +922,106 @@ async function convertQuickBanToSoftban(guildId, userId) {
     return row;
 }
 
+const USER_DM_ACTIONS = ['ban', 'kick', 'mute', 'unmute', 'warn', 'cite', 'void'];
+const userDmCache = new Map();
+
+async function getUserDms(guildId) {
+    if (userDmCache.has(guildId)) return userDmCache.get(guildId);
+    const doc = process.env.MONGODB_URI ? await Guild.findOne({ guildId }).lean().catch(() => null) : null;
+    const src = doc ?? config;
+    const settings = { enabled: !!src.userDms, actions: Array.isArray(src.userDmActions) ? src.userDmActions : [...USER_DM_ACTIONS], showModerator: !!src.userDmShowMod };
+    userDmCache.set(guildId, settings);
+    return settings;
+}
+
+async function setUserDms(guildId, patch) {
+    const update = {};
+    if ('enabled' in patch) update.userDms = patch.enabled;
+    if ('actions' in patch) update.userDmActions = patch.actions;
+    if ('showModerator' in patch) update.userDmShowMod = patch.showModerator;
+    if (process.env.MONGODB_URI) await Guild.findOneAndUpdate({ guildId }, update, { upsert: true, new: true });
+    else {
+        Object.assign(config, update);
+        fs.writeFileSync('./config.json', JSON.stringify(config, null, 4));
+    }
+    userDmCache.clear();
+}
+
+const describeUserDms = (settings) => settings.enabled
+    ? `user DMs are **on** for: ${settings.actions.length ? settings.actions.join(', ') : 'nothing (every action is off)'}. the moderator's name is ${settings.showModerator ? '**shown**' : '**hidden**'} in them. add \`--silent\` to a command to skip the DM.`
+    : 'user DMs are **off**. turn them on with `/userdms enabled:true`.';
+
+const DM_STYLE = {
+    ban: { color: COLORS.deepred, title: (g) => `You were banned from ${g}`, category: 'ban' },
+    softban: { color: COLORS.danger, title: (g) => `You were softbanned from ${g}`, note: 'Your recent messages were removed. You can rejoin the server.', category: 'ban' },
+    kick: { color: COLORS.danger, title: (g) => `You were kicked from ${g}`, note: 'You can rejoin the server with a new invite.', category: 'kick' },
+    mute: { color: COLORS.periwinkle, title: (g) => `You've been timed-out in ${g}`, category: 'mute' },
+    unmute: { color: COLORS.lime, title: (g) => `You were unmuted in ${g}.`, note: 'You can text / participate again.', category: 'unmute' },
+    'unmute-expired': { color: COLORS.lime, title: (g) => `Your mute in ${g} has ended.`, note: 'You can text / participate again.', category: 'unmute' },
+    warn: { color: COLORS.muted, title: (g) => `You've received a warning in ${g}`, category: 'warn' },
+    cite: { color: COLORS.muted, title: (g) => `A message of yours was cited in ${g}`, category: 'cite' },
+    void: { color: COLORS.info, title: (g) => `An infraction against you was voided in ${g}`, note: 'It stays on record but no longer counts.', category: 'void' },
+    delete: { color: COLORS.info, title: (g) => `An infraction against you was removed in ${g}`, note: 'It was deleted from the record.', category: 'void' }
+};
+
+const quoteBlock = (text) => String(text).split('\n').map(l => `> ${l}`).join('\n');
+
+async function dmUser({ guild, user, action, reason, rule, duration, infraction, moderator, excerpt, original, modNote, silent }) {
+    const settings = await getUserDms(guild.id);
+    const style = DM_STYLE[action];
+    if (!settings.enabled || !settings.actions.includes(style.category)) return 'off';
+    if (silent) return 'silent';
+    if (!user || user.bot) return 'off';
+    const color = style.color;
+    const title = style.title(guild.name).slice(0, 256);
+    const showDuration = duration && (action === 'ban' || action === 'mute');
+    const blocks = [];
+    if (reason) blocks.push([action === 'void' ? 'Why?' : 'Reason', quoteBlock(clip(String(reason), 1000))]);
+    if (rule) blocks.push(['Rule-text', quotedRuleText(rule, 500)]);
+    if (original) blocks.push(['Original reason', quoteBlock(clip(String(original), 500))]);
+    if (excerpt) blocks.push(['Your message', quoteBlock(clip(String(excerpt), 300))]);
+    const container = renderLogContainer({
+        title: style.title(`**${String(guild.name).replace(/([\\*_~|`>])/g, '\\$1')}**`),
+        color,
+        description: style.note,
+        plainTitle: true,
+        icon: guild.iconURL?.({ extension: 'png', size: 256 }) ?? undefined,
+        fields: [
+            { name: 'duration', value: showDuration ? (duration.label || (duration.permanent ? 'Permanent' : String(duration))) : '', inline: true },
+            { name: 'infraction', value: infraction?.case_number ? `#${infraction.case_number}` : '', inline: true },
+            { name: 'moderator', value: settings.showModerator && moderator ? moderator.username : '', inline: true },
+            { name: blocks[0]?.[0] ?? 'reason', value: blocks.length ? blocks[0][1] + blocks.slice(1).map(([label, body]) => `\n${label}\n${body}`).join('') : '', section: true, plain: true },
+            { name: 'mod note', value: modNote ? quoteBlock(clip(String(modNote), 500)) : '', section: true, plain: true }
+        ]
+    });
+    try {
+        await user.send({ flags: V2_FLAG, components: [container], allowedMentions: { parse: [] } });
+        return 'sent';
+    } catch (err) {
+        if (err.code === 50007) return 'failed';
+    }
+    const embed = new EmbedBuilder().setColor(color).setTitle(title).setFooter({ text: guild.name, iconURL: guild.iconURL?.() ?? undefined }).setTimestamp();
+    if (style.note) embed.setDescription(style.note);
+    const fields = [];
+    if (reason) fields.push({ name: action === 'void' ? 'Why?' : 'Reason', value: clip(String(reason), 1000) });
+    if (original) fields.push({ name: 'Original reason', value: clip(String(original), 500) });
+    if (rule) fields.push({ name: 'Rule', value: clip(String(rule), 500) });
+    if (excerpt) fields.push({ name: 'Your message', value: clip(String(excerpt), 300) });
+    if (showDuration) fields.push({ name: 'Duration', value: duration.label || (duration.permanent ? 'Permanent' : String(duration)), inline: true });
+    if (infraction?.case_number) fields.push({ name: 'Infraction', value: `#${infraction.case_number}`, inline: true });
+    if (settings.showModerator && moderator) fields.push({ name: 'Moderator', value: moderator.username, inline: true });
+    if (modNote) fields.push({ name: 'Mod note', value: clip(String(modNote), 500) });
+    if (fields.length) embed.addFields(fields);
+    try {
+        await user.send({ embeds: [embed], allowedMentions: { parse: [] } });
+        return 'sent';
+    } catch {
+        return 'failed';
+    }
+}
+
+const dmNote = (result) => ({ sent: ' they were notified by DM.', failed: ' could not DM them (their DMs are closed).', silent: ' silent: they were not notified.' }[result] ?? '');
+
 const banOf = (guild, userId) => guild.bans.fetch({ user: userId, force: true }).catch(() => null);
 
 async function runModAction(interaction, kind) {
@@ -959,6 +1077,7 @@ async function runModAction(interaction, kind) {
         if (member && wasTimedOut) await member.timeout(null, auditReason(reason)).catch(err => console.error('unmute error:', err.message));
         const ended = await endPunishments(guildId, target.id, 'mute');
         if (!ended && !wasTimedOut) return interaction.editReply(`**${target.username}** isn't muted.`);
+        const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild, user: target, action: 'unmute', reason: reason === 'not specified' ? null : reason, moderator: interaction.user, silent: options.getBoolean('silent') ?? false });
         logInBackground(guild, {
             title: 'member unmuted',
             kind: 'moderation',
@@ -969,12 +1088,14 @@ async function runModAction(interaction, kind) {
                 { name: 'reason', value: reason }
             ]
         });
-        return interaction.editReply(`unmuted **${target.username}**.`);
+        return interaction.editReply(`unmuted **${target.username}**.${dmNote(dm)}`);
     }
 
     const resolved = await resolveRuleFields(guildId, options.getString('rule'), options.getString('reason'));
     if (resolved.error) return interaction.editReply(resolved.error);
     const reason = resolved.reason;
+    const silent = options.getBoolean('silent') ?? false;
+    const ruleText = resolved.ruleId ? resolved.snapshot : null;
     const timed = !duration.permanent;
     const record = (action_type) => createInfraction({
         guild_id: guildId,
@@ -992,31 +1113,35 @@ async function runModAction(interaction, kind) {
         { name: byLabel, value: who(interaction.user), inline: true },
         { name: 'duration', value: duration.label, inline: true },
         { name: 'rule', value: resolved.ruleId ? `\`${resolved.ruleId}\`` : 'custom', inline: true },
-        { name: 'reason', value: reason }
+        { name: 'reason', value: reason },
+        { name: 'mod note', value: options.getString('modnote') ?? '' }
     ];
 
     if (kind === 'kick') {
+        const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild, user: target, action: 'kick', reason, rule: ruleText, moderator: interaction.user, silent });
         botKicks.add(key);
         try { await guild.members.kick(target, auditReason(reason)); }
         catch (err) { botKicks.delete(key); return interaction.editReply(`kick failed: ${err.message}`); }
         setTimeout(() => botKicks.delete(key), 30000).unref();
         const infraction = await record('kick');
         logInBackground(guild, { title: `member kicked${infraction ? `: infraction #${infraction.case_number}` : ''}`, kind: 'moderation', color: COLORS.danger, fields: logFields(infraction, 'moderator').filter(f => f.name !== 'duration') });
-        return interaction.editReply(`kicked **${target.username}**${tag(infraction)}.`);
+        return interaction.editReply(`kicked **${target.username}**${tag(infraction)}.${dmNote(dm)}`);
     }
 
     if (kind === 'mute') {
         try { await member.timeout(timed ? Math.min(duration.ms, MAX_TIMEOUT_MS) : MAX_TIMEOUT_MS, auditReason(reason)); }
         catch (err) { return interaction.editReply(`mute failed: ${err.message}`); }
         const infraction = await record('mute');
+        const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild, user: target, action: 'mute', reason, rule: ruleText, duration, infraction, moderator: interaction.user, silent });
         logInBackground(guild, { title: `member muted${infraction ? `: infraction #${infraction.case_number}` : ''}`, kind: 'moderation', color: COLORS.danger, fields: logFields(infraction, 'moderator') });
         const longMute = !timed || duration.ms > MAX_TIMEOUT_MS;
         return interaction.editReply(
-            `muted **${target.username}** for ${duration.label}${tag(infraction)}.` +
+            `muted **${target.username}** for ${duration.label}${tag(infraction)}.${dmNote(dm)}` +
             (longMute && timedColumnsMissing() ? ' the database is missing the duration columns (run db/infractions_duration.sql), so this mute will not be renewed past 28 days.' : '')
         );
     }
 
+    const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild, user: target, action: 'softban', reason, rule: ruleText, moderator: interaction.user, silent });
     botBans.add(key);
     botUnbans.add(key);
     try { await guild.members.ban(target, { deleteMessageSeconds: 0, reason: auditReason(`softban: ${reason}`) }); }
@@ -1029,7 +1154,7 @@ async function runModAction(interaction, kind) {
     const logReady = logsOn && Boolean(await getLogChannel(guild, 'citation'));
     const askNoLog = infraction && supabase && logsOn && !logReady;
     await interaction.editReply({
-        content: `softbanned **${target.username}**${tag(infraction)}. they can rejoin${!supabase ? '.' : !logsOn ? `. ${NO_LOGS_NOTE}` : logReady ? '; building the transcript of their messages now.' : `. ${NO_LOG_CHOICE}`}`,
+        content: `softbanned **${target.username}**${tag(infraction)}.${dmNote(dm)} they can rejoin${!supabase ? '.' : !logsOn ? `. ${NO_LOGS_NOTE}` : logReady ? '; building the transcript of their messages now.' : `. ${NO_LOG_CHOICE}`}`,
         components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : []
     });
     if (infraction && supabase && logReady) {
@@ -1119,7 +1244,11 @@ async function sweepTimedPunishments() {
                 const member = await guild.members.fetch(row.target_user_id).catch(() => null);
                 if (member?.communicationDisabledUntilTimestamp > Date.now()) await member.timeout(null, 'mute expired');
             }
-            await endPunishments(row.guild_id, row.target_user_id, row.action_type);
+            const ended = await endPunishments(row.guild_id, row.target_user_id, row.action_type);
+            if (row.action_type === 'mute' && ended) {
+                const user = await client.users.fetch(row.target_user_id).catch(() => null);
+                dmUser({ guild, user, action: 'unmute-expired', infraction: row }).catch(err => console.error('mute ended DM error:', err.message));
+            }
             logInBackground(guild, {
                 title: row.action_type === 'ban' ? `ban expired: infraction #${row.case_number}` : `mute expired: infraction #${row.case_number}`,
                 kind: 'moderation',
@@ -1845,6 +1974,79 @@ function prefetchAttachments(attachments) {
     return prefetcher.done();
 }
 
+const SEARCH_PAGE = 25;
+const SEARCH_PARALLEL = 4;
+const DISCORD_EPOCH = 1420070400000;
+
+function searchResultAsMessage(raw, channel, guild) {
+    const created = Date.parse(raw.timestamp);
+    const attachments = (raw.attachments || []).map(a => ({ id: a.id, name: a.filename, url: a.url, size: a.size, contentType: a.content_type, description: a.description }));
+    const stickers = raw.sticker_items || [];
+    return {
+        id: raw.id,
+        channelId: raw.channel_id,
+        channel,
+        content: raw.content || '',
+        createdAt: new Date(created),
+        createdTimestamp: created,
+        url: `https://discord.com/channels/${guild.id}/${raw.channel_id}/${raw.id}`,
+        author: { id: raw.author.id, username: raw.author.username },
+        attachments: { size: attachments.length, values: () => attachments },
+        embeds: { length: (raw.embeds || []).length },
+        stickers: { size: stickers.length, map: (fn) => stickers.map(st => fn({ name: st.name })) },
+        reference: raw.message_reference?.message_id ? { messageId: raw.message_reference.message_id } : null,
+        delete: () => channel.messages.delete(raw.id)
+    };
+}
+
+async function searchUserMessages(guild, userId, { sinceMs = 0, channelId, beforeId = null, deadline = Infinity, shouldStop = () => false, onPage }) {
+    const authorIds = [].concat(userId);
+    const minId = sinceMs ? String(BigInt(Math.max(0, sinceMs - DISCORD_EPOCH)) << 22n) : null;
+    const channels = new Map();
+    const channelFor = async (id) => {
+        if (!channels.has(id)) channels.set(id, guild.channels.cache.get(id) ?? await guild.channels.fetch(id).catch(() => null));
+        return channels.get(id);
+    };
+    let maxId = beforeId;
+    let total = 0;
+    let waits = 0;
+    const requestPage = (offset) => {
+        const query = new URLSearchParams({ limit: String(SEARCH_PAGE), sort_by: 'timestamp', sort_order: 'desc', include_nsfw: 'true', offset: String(offset) });
+        for (const id of authorIds) query.append('author_id', id);
+        if (channelId) query.append('channel_id', channelId);
+        if (minId) query.set('min_id', minId);
+        if (maxId) query.set('max_id', maxId);
+        return client.rest.get(`/guilds/${guild.id}/messages/search`, { query });
+    };
+    while (Date.now() < deadline && !shouldStop()) {
+        let responses;
+        try {
+            responses = await Promise.all(Array.from({ length: SEARCH_PARALLEL }, (_, i) => requestPage(i * SEARCH_PAGE)));
+        } catch (err) {
+            return { ok: false, total, error: err.message };
+        }
+        const notReady = responses.find(res => res?.code === 110000);
+        if (notReady) {
+            if (++waits > 4) return { ok: false, total, error: 'search index not ready' };
+            await new Promise(resolve => setTimeout(resolve, Math.min(5000, Math.max(1000, (notReady.retry_after || 1) * 1000))));
+            continue;
+        }
+        const hits = [...new Map(responses.flatMap(res => (res?.messages || []).flat()).filter(m => authorIds.includes(m?.author?.id)).map(m => [m.id, m])).values()];
+        if (!hits.length) break;
+        const byChannel = new Map();
+        for (const raw of hits) byChannel.set(raw.channel_id, [...(byChannel.get(raw.channel_id) || []), raw]);
+        await Promise.all([...byChannel].map(async ([id, list]) => {
+            const channel = await channelFor(id);
+            if (channel) await onPage(channel, list.map(raw => searchResultAsMessage(raw, channel, guild)));
+        }));
+        total += hits.length;
+        const oldest = hits.reduce((lo, m) => (BigInt(m.id) < BigInt(lo) ? m.id : lo), hits[0].id);
+        if (maxId && BigInt(oldest) >= BigInt(maxId)) break;
+        maxId = oldest;
+    }
+    return { ok: true, total };
+}
+
 const snowflakeTime = (id) => Number(BigInt(id) >> 22n) + 1420070400000;
 
 async function sweepUserMessages(guild, userId, days, capMs, onFound, firstChannelId) {
@@ -1901,6 +2103,7 @@ async function archiveAttachments(guild, messages, pending, target, prefetched) 
     for (const [i, batch] of batches.entries()) {
         const files = [];
         const lines = [];
+        const entries = [];
         await Promise.all(batch.items.map(async ({ a, m }, idx) => {
             try {
                 let bytes = held.get(a.id);
@@ -1911,8 +2114,10 @@ async function archiveAttachments(guild, messages, pending, target, prefetched) 
                 }
                 held.delete(a.id);
                 const spoiler = /^(image|video)\//.test(a.contentType || '') ? 'SPOILER_' : '';
-                files[idx] = new AttachmentBuilder(bytes, { name: `${spoiler}${m.id}-${safeName(a.name)}` });
+                const fileName = `${spoiler}${m.id}-${safeName(a.name)}`;
+                files[idx] = new AttachmentBuilder(bytes, { name: fileName });
                 lines[idx] = `${a.name}: ${m.url}`;
+                entries[idx] = { name: fileName, line: `[${String(a.name).replace(/[\[\]]/g, '\\$&')}](${m.url})`, media: /^(image|video)\//.test(a.contentType || '') };
             } catch (err) {
                 console.error('archive download error:', err.message);
                 failed++;
@@ -1920,7 +2125,18 @@ async function archiveAttachments(guild, messages, pending, target, prefetched) 
         }));
         const ready = files.filter(Boolean);
         if (!ready.length) continue;
-        const sent = await logChannel.send({
+        const shown = entries.filter(Boolean);
+        let sent = null;
+        if (USE_CONTAINERS) {
+            const card = containerHeader(new ContainerBuilder().setAccentColor(COLORS.danger), `## Archive for ${target.username}\n> **Infraction:** \`#${pending.case_number}\`\n> **Batch:** ${i + 1}/${batches.length}`, target.displayAvatarURL?.() || okiteIcon());
+            card.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`**Files**\n${clip(shown.map(e => e.line).join('\n'), 1500)}`));
+            const gallery = shown.filter(e => e.media);
+            const others = shown.filter(e => !e.media);
+            if (gallery.length) card.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(...gallery.map(e => new MediaGalleryItemBuilder().setURL(`attachment://${e.name}`).setSpoiler(true))));
+            if (others.length) card.addFileComponents(...others.map(e => new FileBuilder().setURL(`attachment://${e.name}`)));
+            sent = await logChannel.send({ flags: V2_FLAG, components: [card], files: ready, allowedMentions: { parse: [] } }).catch(err => { console.error('archive card error:', err.message); return null; });
+        }
+        if (!sent) sent = await logChannel.send({
             content: clip(`infraction #${pending.case_number} archive for ${target.username} (batch ${i + 1}/${batches.length})\n${lines.filter(Boolean).join('\n')}`, 1900),
             files: ready,
             allowedMentions: { parse: [] }
@@ -1940,7 +2156,7 @@ async function editBanPrompt(guild, pending, content) {
     if (first?.type === ComponentType.Container) {
         const container = new ContainerBuilder(first.toJSON());
         container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(content));
-        await message.edit({ components: [container], allowedMentions: { parse: [] } }).catch(err => console.error('ban prompt edit error:', err.message));
+        await message.edit({ flags: V2_FLAG, components: [container], allowedMentions: { parse: [] } }).catch(err => console.error('ban prompt edit error:', err.message));
         return;
     }
     await message.edit({ content, components: [], allowedMentions: { parse: [] } }).catch(() => null);
@@ -2052,8 +2268,6 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
             await deleteUserMessages(channel, fresh, removal);
         };
         const startedAt = Date.now();
-        const indexed = await getIndexedRefs(guild.id, target.id);
-        const indexedAt = Date.now();
         let quickCount = 0;
         const handleIndexed = async (refs, cache) => {
             if (!refs.length) return;
@@ -2072,15 +2286,29 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
             if (slow.length) lanes.push(fetchSnapshot(guild, slow, take).then((snap) => { missing += snap.missing; }));
             await Promise.all(lanes);
         };
+        const searchStarted = Date.now();
+        const searchWindow = { sinceMs: Date.now() - days * 24 * 60 * 60 * 1000, deadline: Date.now() + 60000, onPage: take };
+        let searched = { ok: false, total: 0 };
+        if (channelId) searched = await searchUserMessages(guild, target.id, { ...searchWindow, channelId });
+        if (searched.ok || !channelId) {
+            const rest = await searchUserMessages(guild, target.id, searchWindow);
+            searched = { ok: rest.ok, total: searched.total + rest.total, error: rest.error };
+        }
+        const searchDone = Date.now();
+        const indexed = await getIndexedRefs(guild.id, target.id);
+        const indexedAt = Date.now();
+        const indexOnly = indexed.filter(r => !seen.has(r.m)).length;
         if (indexed.length) {
             const cache = await lookupCachedMessages(guild.id, indexed.map(r => r.m));
-            await handleIndexed(indexed.filter(r => r.c === channelId), cache);
-            await handleIndexed(indexed.filter(r => r.c !== channelId), cache);
+            const pendingRefs = searched.ok ? indexed.filter(r => !seen.has(r.m)) : indexed;
+            await handleIndexed(pendingRefs.filter(r => r.c === channelId), cache);
+            await handleIndexed(pendingRefs.filter(r => r.c !== channelId), cache);
         }
-        const indexedDone = Date.now();
-        const covered = indexed.length > 0 && days <= INDEX_WINDOW_MS / 86400000;
-        await sweepUserMessages(guild, target.id, days, covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS, take, channelId);
-        console.log(`ban cleanup #${infraction.case_number}: index lookup ${indexedAt - startedAt}ms (${indexed.length} refs, ${quickCount} deleted without fetching), indexed deletes done at ${indexedDone - startedAt}ms, sweep done at ${Date.now() - startedAt}ms, ${collected.length} messages total`);
+        if (!searched.ok) {
+            const covered = indexed.length > 0 && days <= INDEX_WINDOW_MS / 86400000;
+            await sweepUserMessages(guild, target.id, days, covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS, take, channelId);
+        }
+        console.log(`ban cleanup #${infraction.case_number}: search ${searched.ok ? `${searched.total} found in ${searchDone - searchStarted}ms` : `failed (${searched.error}), swept instead`}, index check ${indexedAt - searchDone}ms (${indexed.length} refs, ${indexOnly} found only there, ${quickCount} deleted without fetching), all done at ${Date.now() - startedAt}ms, ${collected.length} messages total`);
         forgetCachedMessagesBy(guild.id, target.id);
         if (supabase) await supabase.from('message_index').delete().eq('guild_id', guild.id).eq('user_id', target.id);
         deleteFailures = removal.errors;
@@ -2544,6 +2772,16 @@ function renderAudit(guild, result) {
     return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], files: [new AttachmentBuilder(Buffer.from(reportText(guild, result), 'utf8'), { name: 'security-audit.txt' })] };
 }
 
+async function refuseInfractionButton(interaction, isMod) {
+    if (!isMod) return 'you need **Manage Messages** to use this.';
+    if (interaction.customId.startsWith('infact:view:')) return null;
+    const meta = interaction.message;
+    let owner = meta?.interactionMetadata?.user?.id ?? meta?.interaction?.user?.id ?? null;
+    if (!owner && meta?.reference?.messageId) owner = (await interaction.channel?.messages.fetch(meta.reference.messageId).catch(() => null))?.author.id ?? null;
+    if (owner && owner !== interaction.user.id) return `only <@${owner}> can use these buttons. run the command yourself to get your own.`;
+    return null;
+}
+
 async function handleInteraction(interaction) {
     if (interaction.isButton?.() && interaction.customId.startsWith('suggest_')) return;
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
@@ -2559,7 +2797,7 @@ async function handleInteraction(interaction) {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
 
-        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
+        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
             return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
 
@@ -2689,6 +2927,33 @@ async function handleInteraction(interaction) {
                     { name: 'moderator', value: who(interaction.user), inline: true },
                     { name: 'before', value: current ? 'on' : 'off', inline: true },
                     { name: 'now', value: wanted ? 'on' : 'off', inline: true }
+                ]
+            });
+            return replied;
+        }
+
+        if (commandName === 'userdms') {
+            const current = await getUserDms(guildId);
+            const enabled = options.getBoolean('enabled') ?? null;
+            const action = options.getString('action') ?? null;
+            const send = options.getBoolean('send') ?? null;
+            const showModerator = options.getBoolean('show_moderator') ?? null;
+            if (enabled === null && !action && send === null && showModerator === null) return interaction.reply({ content: describeUserDms(current), ephemeral: true });
+            if (Boolean(action) !== (send !== null)) return interaction.reply({ content: 'pick an action and send:true or send:false together, for example `action:ban send:false`.', ephemeral: true });
+            const patch = {};
+            if (enabled !== null) patch.enabled = enabled;
+            if (action) patch.actions = send ? [...new Set([...current.actions, action])] : current.actions.filter(a => a !== action);
+            if (showModerator !== null) patch.showModerator = showModerator;
+            await setUserDms(guildId, patch);
+            const now = await getUserDms(guildId);
+            const replied = interaction.reply({ content: describeUserDms(now), ephemeral: true });
+            logInBackground(interaction.guild, {
+                title: 'user DMs changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current.enabled ? `on: ${current.actions.join(', ') || 'none'}${current.showModerator ? ', moderator shown' : ''}` : 'off', inline: true },
+                    { name: 'now', value: now.enabled ? `on: ${now.actions.join(', ') || 'none'}${now.showModerator ? ', moderator shown' : ''}` : 'off', inline: true }
                 ]
             });
             return replied;
@@ -3167,6 +3432,8 @@ async function handleInteraction(interaction) {
                 return interaction.editReply(`**${target.username}** is already banned${urgent ? ', so banning again cannot delete their messages. use /purge for those' : ''}.`);
             }
 
+            const silent = options.getBoolean('silent') ?? false;
+            const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild: interaction.guild, user: target, action: 'ban', reason, rule: resolved.ruleId ? resolved.snapshot : null, duration: banDuration ?? { permanent: true, label: 'Permanent' }, moderator: interaction.user, silent });
             const key = `${interaction.guildId}:${target.id}`;
             botBans.add(key);
             let purge = null;
@@ -3204,7 +3471,7 @@ async function handleInteraction(interaction) {
             const logReady = logsOn && Boolean(await getLogChannel(interaction.guild, 'citation'));
             const askNoLog = !urgent && infraction && supabase && logsOn && !logReady;
             await interaction.editReply({ components: askNoLog ? [noLogButtons(target.id, infraction.case_number)] : [], content:
-                `banned **${target.username}**${timed ? ` for ${banDuration.label}` : ''}${infraction ? ` (infraction #${infraction.case_number})` : ''}.` +
+                `banned **${target.username}**${timed ? ` for ${banDuration.label}` : ''}${infraction ? ` (infraction #${infraction.case_number})` : ''}.${dmNote(dm)}` +
                 (timed && timedColumnsMissing() ? ' the database is missing the duration columns (run db/infractions_duration.sql), so this ban will not lift itself.' : '') +
                 (urgent
                     ? ' clearing their messages now, nothing is saved. if this was illegal content, report it with Discord\'s Report Message and to your national hotline.'
@@ -3219,6 +3486,7 @@ async function handleInteraction(interaction) {
                     { name: 'user', value: who(target), inline: true },
                     { name: 'moderator', value: who(interaction.user), inline: true },
                     { name: 'reason', value: reason },
+                    { name: 'mod note', value: options.getString('modnote') ?? '' },
                     { name: 'duration', value: banDuration ? banDuration.label : 'Permanent', inline: true },
                     { name: 'mode', value: urgent ? 'urgent: history deleted immediately, nothing saved' : 'messages kept until staff decide' }
                 ]
@@ -3357,6 +3625,7 @@ async function handleInteraction(interaction) {
                     ...durationColumns(parsedDuration)
                 });
                 if (!row) return interaction.editReply('failed to record the infraction.');
+                const dm = await dmUser({ modNote: options.getString('modnote') ?? null, guild: interaction.guild, user: target, action: 'warn', reason, rule: ruleId ? snapshot : null, duration: parsedDuration, infraction: row, excerpt: parent?.content, moderator: interaction.user, silent: options.getBoolean('silent') ?? false });
 
                 const fields = [
                     { name: 'moderator', value: who(interaction.user), inline: true },
@@ -3364,6 +3633,7 @@ async function handleInteraction(interaction) {
                     { name: 'rule', value: ruleId ? `\`${ruleId}\`` : 'custom', inline: true },
                     { name: 'rule-text', value: ruleId ? quotedRuleText(snapshot, 1000) : '' },
                     { name: 'reason', value: clip(reason) },
+                    { name: 'mod note', value: options.getString('modnote') ?? '' },
                     { name: 'duration', value: parsedDuration ? parsedDuration.label : 'Permanent', inline: true }
                 ];
                 if (parent) {
@@ -3383,13 +3653,13 @@ async function handleInteraction(interaction) {
                     if (!logged) return interaction.editReply(`recorded infraction **#${row.case_number}**, but could not write to the log channel, so the message was left in place.`);
                     await Promise.all([
                         parent.delete().catch(() => null),
-                        interaction.editReply(`recorded infraction **#${row.case_number}** for **${target.username}** and deleted the message.`)
+                        interaction.editReply(`recorded infraction **#${row.case_number}** for **${target.username}** and deleted the message.${dmNote(dm)}`)
                     ]);
                     return;
                 }
 
                 logInBackground(interaction.guild, payload);
-                return interaction.editReply(`recorded infraction **#${row.case_number}** for **${target.username}**.`);
+                return interaction.editReply(`recorded infraction **#${row.case_number}** for **${target.username}**.${dmNote(dm)}`);
             }
 
             if (sub === 'edit') {
@@ -3562,7 +3832,13 @@ async function handleInteraction(interaction) {
             note = `archived files removed (${removed} post${removed === 1 ? '' : 's'}, infraction #${caseNumber}), decided by ${interaction.user}.`;
         }
         const container = interaction.message?.components?.[0]?.type === ComponentType.Container;
-        return interaction.editReply(container ? { components: [noticeContainer(note)] } : { content: note, embeds: [], components: [], allowedMentions: { parse: [] } });
+        const edit = container ? { flags: V2_FLAG, components: [noticeContainer(note)] } : { content: note, embeds: [], components: [], allowedMentions: { parse: [] } };
+        try {
+            return await interaction.editReply(edit);
+        } catch (err) {
+            console.error('archive prompt edit error:', err.message);
+            return interaction.message?.edit(edit).catch(e => console.error('archive prompt fallback edit error:', e.message));
+        }
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('ban_')) {
@@ -3572,12 +3848,17 @@ async function handleInteraction(interaction) {
         const containerPrompt = interaction.message?.components?.[0]?.type === ComponentType.Container;
         if (!pending || pending.guild_id !== interaction.guildId) {
             const note = 'this prompt was already handled or has expired.';
-            return interaction.editReply(containerPrompt ? { components: [noticeContainer(note)] } : { content: note, components: [] });
+            return interaction.editReply(containerPrompt ? { flags: V2_FLAG, components: [noticeContainer(note)] } : { content: note, components: [] });
         }
 
         const summary = await finalizeBan(interaction.guild, pending, { save: action === 'ban_save', by: interaction.user });
         if (containerPrompt) return;
         return interaction.editReply({ content: `${summary} decided by ${interaction.user}.`, components: [], allowedMentions: { parse: [] } });
+    }
+
+    if (interaction.isButton() && /^inf(act|page):/.test(interaction.customId)) {
+        const refused = await refuseInfractionButton(interaction, isMod);
+        if (refused) return interaction.reply({ content: refused, ephemeral: true, allowedMentions: { parse: [] } });
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('infact:')) {
@@ -3604,15 +3885,27 @@ async function handleInteraction(interaction) {
         }
 
         await interaction.deferReply({ ephemeral: true });
-        if (action === 'view') {
-            const row = await getInfraction(interaction.guildId, Number.parseInt(ref, 10));
-            if (!row) return interaction.editReply(`infraction #${ref} not found.`);
-            return interaction.editReply(await renderInfractionCard({ guild: interaction.guild, row }));
-        }
-        if (action === 'restore') return setInfractionVoid(interaction, Number.parseInt(ref, 10), false, null);
-        if (action === 'history') {
+        const render = async () => {
+            if (action === 'view') {
+                const row = await getInfraction(interaction.guildId, Number.parseInt(ref, 10));
+                if (!row) return `infraction #${ref} not found.`;
+                return renderInfractionCard({ guild: interaction.guild, row });
+            }
             const target = await client.users.fetch(ref).catch(() => ({ id: ref, username: ref }));
-            return interaction.editReply(await renderInfractionList({ guild: interaction.guild, sub: 'user', target }));
+            return renderInfractionList({ guild: interaction.guild, sub: 'user', target });
+        };
+        if (action === 'restore') return setInfractionVoid(interaction, Number.parseInt(ref, 10), false, null);
+        if (action === 'view' || action === 'history') {
+            let timer;
+            try {
+                const payload = await Promise.race([render(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timed out')), 12000); })]);
+                return await interaction.editReply(payload);
+            } catch (err) {
+                console.error('infraction button error:', err.message);
+                return interaction.editReply('that took too long or failed. press the button again.').catch(() => null);
+            } finally {
+                clearTimeout(timer);
+            }
         }
         return interaction.editReply('unknown action.');
     }
@@ -3709,6 +4002,7 @@ async function handleInteraction(interaction) {
 
         if (customId.startsWith('infmodal:')) {
             const [, action, ref] = customId.split(':');
+            if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use this.', ephemeral: true });
             await interaction.deferReply({ ephemeral: true });
             const text = fields.getTextInputValue('text').trim();
             if (!text) return interaction.editReply('that can\'t be empty.');
@@ -3764,7 +4058,7 @@ client.on(Events.InteractionCreate, (interaction) => {
     });
 });
 
-async function handleModerationAction(interaction, action, targetUserId, targetMessageId, reason, ruleId = null) {
+async function handleModerationAction(interaction, action, targetUserId, targetMessageId, reason, ruleId = null, { silent = false, modNote = null } = {}) {
     await interaction.deferReply({ ephemeral: true });
 
     const channel = interaction.channel;
@@ -3791,6 +4085,7 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
                 evidence_urls: []
             });
             const caseTag = infraction ? ` (infraction #${infraction.case_number})` : '';
+            const dm = await dmUser({ guild: interaction.guild, user: targetMessage.author, action: 'cite', reason, excerpt: targetMessage.content, infraction, moderator: interaction.user, modNote, silent });
 
             const noticePromise = targetMessage.reply(`staff notice for <@${targetMessage.author.id}>${caseTag}:\n${reason}`);
             noticePromise.catch(() => null);
@@ -3819,11 +4114,11 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
             }
 
             if (!(await getAutoPurge(interaction.guildId)).parent) {
-                return interaction.editReply(`rule citation posted${caseTag}. the cited message was left in place (parent auto-purge is off).`);
+                return interaction.editReply(`rule citation posted${caseTag}. the cited message was left in place (parent auto-purge is off).${dmNote(dm)}`);
             }
             await Promise.all([
                 targetMessage.delete().catch(() => null),
-                interaction.editReply(`rule citation posted${caseTag} & parent message deleted.`)
+                interaction.editReply(`rule citation posted${caseTag} & parent message deleted.${dmNote(dm)}`)
             ]);
             return;
         }
@@ -3850,13 +4145,28 @@ async function collectRecentMessages(channel, beforeId, count, userIds = []) {
     return out;
 }
 
+async function collectUserMessagesInChannel(channel, userIds, count, beforeId) {
+    const found = new Map();
+    const searched = await searchUserMessages(channel.guild, userIds, {
+        channelId: channel.id,
+        beforeId,
+        shouldStop: () => found.size >= count,
+        onPage: async (_, list) => list.forEach(m => found.set(m.id, m))
+    });
+    if (!searched.ok) return null;
+    const recent = await channel.messages.fetch({ limit: 100, ...(beforeId ? { before: beforeId } : {}) }).catch(() => null);
+    for (const m of recent?.values?.() ?? []) if (userIds.includes(m.author.id)) found.set(m.id, m);
+    return [...found.values()].sort((x, y) => y.createdTimestamp - x.createdTimestamp).slice(0, count);
+}
+
 async function runCountPurge(interaction, { count, users = [], beforeId, extraMessages = [] }) {
     await interaction.deferReply({ ephemeral: true });
     if (!interaction.channel.permissionsFor(interaction.guild.members.me).has(PermissionFlagsBits.ManageMessages)) {
         return interaction.editReply('okite is missing **Manage Messages** in this channel, cannot purge.');
     }
     try {
-        const collected = await collectRecentMessages(interaction.channel, beforeId, count, users.map(u => u.id));
+        const userIds = users.map(u => u.id);
+        const collected = (userIds.length ? await collectUserMessagesInChannel(interaction.channel, userIds, count, beforeId) : null) ?? await collectRecentMessages(interaction.channel, beforeId, count, userIds);
         if (collected.length === 0) return interaction.editReply('no matching messages found.');
         const toDelete = [...collected, ...extraMessages].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
         return await executePurge(interaction, toDelete, {
@@ -3981,29 +4291,46 @@ async function runUserPurge(interaction, target) {
         if (!startLogged) return confirmation.update({ content: 'could not write to the log channel, purge aborted so nothing gets deleted without a paper trail.', components: [] });
 
         const stopRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('userpurge_stop').setLabel('stop').setStyle(ButtonStyle.Secondary));
-        await confirmation.update({ content: `scanning channels for **${target.username}**…`, components: [stopRow] });
+        await confirmation.update({ content: `scanning for **${target.username}**…`, components: [stopRow] });
         collector = prompt.createMessageComponentCollector({ filter: i => i.user.id === interaction.user.id && i.customId === 'userpurge_stop', time: INTERACTION_LIFETIME_MS });
         collector.on('collect', i => {
             state.cancelled = true;
             i.update({ content: 'stopping after the current batch…', components: [] }).catch(() => null);
         });
 
-        const { channels, skipped } = await purgeableChannels(guild);
+        let channels = [];
+        let skipped = 0;
         let done = 0;
+        let searching = true;
         ticker = setInterval(() => {
             if (state.cancelled || Date.now() - started > INTERACTION_LIFETIME_MS) return;
-            interaction.editReply({ content: `purging **${target.username}**: scanned ${state.scanned.toLocaleString()} messages, ${done}/${channels.length} channels done, deleted ${state.deleted.toLocaleString()}.`, components: [stopRow] }).catch(() => null);
+            const progress = searching
+                ? `found ${state.scanned.toLocaleString()} messages so far`
+                : `scanned ${state.scanned.toLocaleString()} messages, ${done}/${channels.length} channels done`;
+            interaction.editReply({ content: `purging **${target.username}**: ${progress}, deleted ${state.deleted.toLocaleString()}.`, components: [stopRow] }).catch(() => null);
         }, 5000);
 
-        let next = 0;
-        const worker = async () => {
-            while (next < channels.length && !state.cancelled) {
-                const channel = channels[next++];
-                await purgeUserInChannel(channel, target.id, state).catch(err => { state.errors++; console.error('user purge channel error:', err.message); });
-                done++;
+        const searched = await searchUserMessages(guild, target.id, {
+            shouldStop: () => state.cancelled,
+            onPage: async (channel, found) => {
+                state.scanned += found.length;
+                await eraseUserMessages(channel, found, state);
             }
-        };
-        await Promise.all(Array.from({ length: USER_PURGE_WORKERS }, worker));
+        });
+        searching = false;
+        if (!searched.ok) {
+            console.error('user purge search failed, scanning channels instead:', searched.error);
+            ({ channels, skipped } = await purgeableChannels(guild));
+            let next = 0;
+            const worker = async () => {
+                while (next < channels.length && !state.cancelled) {
+                    const channel = channels[next++];
+                    await purgeUserInChannel(channel, target.id, state).catch(err => { state.errors++; console.error('user purge channel error:', err.message); });
+                    done++;
+                }
+            };
+            await Promise.all(Array.from({ length: USER_PURGE_WORKERS }, worker));
+        }
 
         forgetCachedMessagesBy(guild.id, target.id);
         if (supabase) await supabase.from('message_index').delete().eq('guild_id', guild.id).eq('user_id', target.id);
@@ -4018,13 +4345,14 @@ async function runUserPurge(interaction, target) {
                 { name: 'user', value: who(target), inline: true },
                 { name: 'deleted', value: String(state.deleted), inline: true },
                 { name: 'scanned', value: String(state.scanned), inline: true },
-                { name: 'channels', value: `${done}/${channels.length}${skipped ? `, ${skipped} skipped (no access)` : ''}`, inline: true },
+                { name: 'found by', value: searched.ok ? 'discord search' : 'channel scan', inline: true },
+                { name: 'channels', value: searched.ok ? 'all' : `${done}/${channels.length}${skipped ? `, ${skipped} skipped (no access)` : ''}`, inline: true },
                 { name: 'failures', value: String(state.errors), inline: true },
                 { name: 'took', value: formatDuration(Date.now() - started), inline: true }
             ],
             ...(state.lines.length ? { file: { name: `obliterate-${target.id}-${Date.now()}.txt`, content: `${header}\n${state.lines.join('\n')}` } } : {})
         });
-        await interaction.editReply({ content: `${state.cancelled ? 'stopped' : 'completed'}: deleted **${state.deleted.toLocaleString()}** messages from **${target.username}** after scanning ${state.scanned.toLocaleString()} in ${done}/${channels.length} channels${skipped ? ` (${skipped} skipped, no access)` : ''}${state.errors ? `, ${state.errors} failures` : ''}.`, components: [] }).catch(() => null);
+        await interaction.editReply({ content: `${state.cancelled ? 'stopped' : 'completed'}: deleted **${state.deleted.toLocaleString()}** messages from **${target.username}** ${searched.ok ? `found by search (${state.scanned.toLocaleString()} matches)` : `after scanning ${state.scanned.toLocaleString()} in ${done}/${channels.length} channels${skipped ? ` (${skipped} skipped, no access)` : ''}`}${state.errors ? `, ${state.errors} failures` : ''}.`, components: [] }).catch(() => null);
     } catch (error) {
         console.error('user purge error:', error);
         await interaction.editReply({ content: `the purge hit an error: ${error.message}. ${state.deleted} messages were deleted before it stopped.`, components: [] }).catch(() => null);
@@ -4070,7 +4398,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
-    setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    userdms: 'userdms', dms: 'userdms', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
@@ -4089,7 +4417,7 @@ const prefixCache = new Map();
 const HELP_GROUPS = [
     ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'bancleanup', 'timezone', 'rule']],
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'bancleanup', 'timezone', 'rule']],
     ['utility', ['ping', 'help', 'security-audit']]
 ];
 const COMMAND_HELP = require('./help');
@@ -4423,8 +4751,15 @@ async function confirmUser(message, matches, verb = 'using') {
 }
 
 async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false) {
+    const noteCapable = ['ban', 'kick', 'softban', 'mute', 'unmute', 'infraction'].includes(name);
+    const mnMatch = noteCapable ? argText.match(/(^|\s)--(?:mn|modnote)(?:\s+([\s\S]*))?$/i) : null;
+    const modNote = mnMatch ? (mnMatch[2] || '').trim() || null : null;
+    if (mnMatch) argText = argText.slice(0, mnMatch.index).trim();
+    const silentFlag = /(^|\s)(--silent|-s)(?=\s|$)/gi;
+    const silent = noteCapable && /(^|\s)(--silent|-s)(?=\s|$)/i.test(argText);
+    if (silent) argText = argText.replace(silentFlag, '$1').trim();
     const args = argText.trim() ? argText.trim().split(/\s+/) : [];
-    const values = {};
+    const values = { silent, modnote: modNote };
     let subcommand = null;
     const fail = (error) => ({ error });
 
@@ -4532,6 +4867,18 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         }
         if (values.days !== undefined && (values.days < 1 || values.days > 30)) return fail('days must be between 1 and 30.');
         return { commandName: 'bancleanup', subcommand, values };
+    }
+
+    if (name === 'userdms') {
+        const first = args[0]?.toLowerCase();
+        const state = ON_OFF[args[1]?.toLowerCase()];
+        const actionWords = { ban: 'ban', kick: 'kick', mute: 'mute', timeout: 'mute', unmute: 'unmute', warn: 'warn', warning: 'warn', cite: 'cite', citation: 'cite', void: 'void', delete: 'void', removal: 'void' };
+        if (!first || first === 'show') return { commandName: 'userdms', subcommand, values };
+        if (ON_OFF[first]) values.enabled = ON_OFF[first] === 'on';
+        else if (['moderator', 'mod'].includes(first) && state) values.show_moderator = state === 'on';
+        else if (actionWords[first] && state) { values.action = actionWords[first]; values.send = state === 'on'; }
+        else return fail(`syntax: \`${PREFIX}userdms\` to show, \`${PREFIX}userdms on|off\`, \`${PREFIX}userdms <ban|kick|mute|unmute|warn|cite|void> on|off\`, or \`${PREFIX}userdms moderator on|off\``);
+        return { commandName: 'userdms', subcommand, values };
     }
 
     if (name === 'messagelogs') {
@@ -4676,7 +5023,7 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
             const parent = used === 0 ? await getReplyMessage(message) : null;
             if (parent && parent.author.id === values.user.id) values.parentMessage = parent;
         } else if (subcommand !== 'recent') {
-            return fail(`syntax: \`${PREFIX}infraction view|user|moderator|recent|add|edit|void|restore\``);
+            return fail(`syntax: \`${PREFIX}infraction view|user|moderator|recent|add|edit|void|restore|delete\``);
         }
         return { commandName: 'infraction', subcommand, values };
     }
@@ -4690,6 +5037,7 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'rule' || commandName === 'alias') return subcommand === 'list';
     if (commandName === 'prefix') return !subcommand || subcommand === 'show';
     if (commandName === 'autopurge' || commandName === 'autocorrect' || commandName === 'requirerule' || commandName === 'messagelogs') return values.enabled === undefined || values.enabled === null;
+    if (commandName === 'userdms') return values.enabled === undefined && values.action === undefined && values.show_moderator === undefined;
     if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
     return false;
@@ -4862,6 +5210,17 @@ async function runPrefixMessage(message) {
         if (!target) return reply('couldn\'t find the message you replied to.');
         if (target.author.bot) return reply('can\'t cite a bot\'s message.');
 
+        const mnCite = argText.match(/(^|\s)--(?:mn|modnote)(?:\s+([\s\S]*))?$/i);
+        const modNoteCite = mnCite ? (mnCite[2] || '').trim() || null : null;
+        if (mnCite) {
+            argText = argText.slice(0, mnCite.index).trim();
+            rest = argText ? argText.split(/\s+/) : [];
+        }
+        const silentCite = /(^|\s)(--silent|-s)(?=\s|$)/i.test(argText);
+        if (silentCite) {
+            argText = argText.replace(/(^|\s)(--silent|-s)(?=\s|$)/gi, '$1').trim();
+            rest = argText ? argText.split(/\s+/) : [];
+        }
         const first = rest[0];
         if (!first) return reply(`syntax: \`${PREFIX}cite <rule id>\` or \`${PREFIX}cite custom <reason>\``);
 
@@ -4878,7 +5237,7 @@ async function runPrefixMessage(message) {
         }
 
         const interaction = createPrefixInteraction(message, 'lookup', null, {});
-        await handleModerationAction(interaction, 'lookup', target.author.id, target.id, text, ruleId);
+        await handleModerationAction(interaction, 'lookup', target.author.id, target.id, text, ruleId, { silent: silentCite, modNote: modNoteCite });
         message.delete().catch(() => null);
         await interaction.cleanup();
         return;

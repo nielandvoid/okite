@@ -1,25 +1,25 @@
 module.exports = {
     ban: {
         summary: 'ban a user and keep a transcript of their last 7 days',
-        syntax: 'ban <user> [duration] [--urgent] [--rule <id>] [reason]',
+        syntax: 'ban <user> [duration] [--urgent] [--silent] [--rule <id>] [reason] [--mn <note>]',
         desc: 'bans a user.\nwith ban cleanup on (the default, see `bancleanup`) a transcript (.txt and .md) of their messages from every channel is posted to the log channel, their attachments are archived there, and the messages are deleted from chat. specify [duration] for tempban. reply to a message to skip the <user>. `--urgent` is for potentially illegal / heavily problematic content: the ban lands first, their newest messages are deleted at once and the rest of the window right after, and nothing is saved or logged.',
         perm: 'Ban Members'
     },
     kick: {
         summary: 'kick a user and record an infraction',
-        syntax: 'kick <user> [--rule <id>] [reason]',
+        syntax: 'kick <user> [--silent] [--rule <id>] [reason] [--mn <note>]',
         desc: 'kicks a user.\nthe user is removed from the server and an infraction is recorded. their messages are kept, and they can rejoin with a new invite. cite a rule with [--rule <id>], or give a [reason].',
         perm: 'Kick Members'
     },
     softban: {
         summary: 'ban and unban at once to clear a user\'s recent messages',
-        syntax: 'softban <user> [--rule <id>] [reason]',
+        syntax: 'softban <user> [--silent] [--rule <id>] [reason] [--mn <note>]',
         desc: 'softbans a user.\nthe user is banned and unbanned in one step, so they can rejoin. their last 7-days\' messages are handled the same way as `ban`: transcript to the citation-logs, staff decides on the attachments (option validity: 24h), then deletion. recorded as a softban. a ban lifted by hand within a minute is recorded as one too.',
         perm: 'Ban Members'
     },
     mute: {
         summary: 'time a user out',
-        syntax: 'mute <user> [duration] [--rule <id>] [reason]',
+        syntax: 'mute <user> [duration] [--silent] [--rule <id>] [reason] [--mn <note>]',
         desc: 'mutes a user.\ndiscord\'s timeout is applied for [duration], or until lifted when none is given. a timeout can\'t exceed 28 days, so it is re-applied until the duration ends. aliases: `m`, `timeout`.',
         perm: 'Timeout Members'
     },
@@ -49,7 +49,7 @@ module.exports = {
     },
     unmute: {
         summary: 'lift a user\'s timeout',
-        syntax: 'unmute <user>',
+        syntax: 'unmute <user> [--silent] [reason] [--mn <note>]',
         desc: 'unmutes a user.\nthe timeout is removed and the open mute infraction is closed, so it stops being renewed. alias: `untimeout`.',
         perm: 'Timeout Members'
     },
@@ -67,7 +67,7 @@ module.exports = {
     },
     cite: {
         summary: 'cite a rule against a message',
-        syntax: 'cite <rule id>\ncite custom <reason>',
+        syntax: 'cite <rule id> [--silent] [--mn <note>]\ncite custom <reason> [--silent] [--mn <note>]',
         desc: 'cites a rule against a message.\nused as a reply. the message, its attachments and the specified rule are logged to the citation-logs, an infraction is recorded for the author, then the message is deleted (unless `autopurge parent` is off). nothing is deleted before the log write succeeds.',
         perm: 'Manage Messages'
     },
@@ -85,7 +85,7 @@ module.exports = {
     },
     infraction: {
         summary: 'view and manage recorded infractions',
-        syntax: 'infraction view <id>\ninfraction user <user>\ninfraction moderator <user>\ninfraction recent\ninfraction add <user> [rule|custom] [duration] [reason]\ninfraction edit <id> <reason>\ninfraction void <id> <reason>\ninfraction restore <id>\ninfraction delete <id>',
+        syntax: 'infraction view <id>\ninfraction user <user>\ninfraction moderator <user>\ninfraction recent\ninfraction add <user> [rule|custom] [duration] [--silent] [reason] [--mn <note>]\ninfraction edit <id> <reason>\ninfraction void <id> <reason> [--silent] [--mn <note>]\ninfraction restore <id>\ninfraction delete <id> [--silent] [--mn <note>]',
         desc: 'views and manages infractions.\neach server numbers its own, from #1. `user` lists what was done to a member, `moderator` lists what a moderator issued, `recent` lists the latest in the server. `void` keeps an infraction on record but stops it counting, `restore` undoes that. `delete` removes one for good after a confirmation, and writes it to the citation-logs first; its number is not reused. aliases: `infractions`, `inf`, `history`.',
         perm: 'Manage Messages'
     },
@@ -129,6 +129,12 @@ module.exports = {
         summary: 'require a rule for every moderation action',
         syntax: 'requirerule\nrequirerule on|off',
         desc: 'makes a rule compulsory.\nwhen on, `ban`, `kick`, `softban`, `mute` and `infraction add` need a rule id, or `custom` with a reason. when off (the default), the rule is optional and none is recorded as custom. per server.',
+        perm: 'Manage Channels'
+    },
+    userdms: {
+        summary: 'DM users when a moderator acts on them',
+        syntax: 'userdms\nuserdms on|off\nuserdms <ban|kick|mute|unmute|warn|cite|void> on|off\nuserdms moderator on|off',
+        desc: 'opt-in notifications. off by default. when on, okite DMs a member when they are banned, softbanned, kicked, muted, unmuted or warned, when their mute ends, when one of their messages is cited, or when an infraction against them is voided or deleted, with the server, what happened, the reason, the rule, how long, and the infraction number.\nthe slash form is `/userdms enabled:true`, `/userdms action:ban send:false` and `/userdms show_moderator:true`. the moderator\'s name is hidden unless you turn it on. add `--silent` (or `-s`) to a command, or `silent:true` on the slash form, to skip the DM for that one action. add `--mn <note>` or `--modnote <note>` (it takes the rest of the line, so put it last) or `modnote` on the slash form to put a note from the moderator in the DM; it also shows in that action\'s log. the DM goes out before a ban or kick, so it can still be delivered. if their DMs are closed, the moderator is told. alias: `dms`.',
         perm: 'Manage Channels'
     },
     bancleanup: {
