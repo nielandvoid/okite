@@ -20,6 +20,10 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 
 **User notifications** (on by default, per server): an admin can turn them off with `/userdms enabled:false`. While they are on, okite sends a direct message to a member when a moderator bans, softbans, kicks, mutes, unmutes or warns them, when their mute ends, when a moderator cites one of their messages, or when an infraction against them is voided or deleted. It contains the server name, what happened, the reason and rule the moderator gave, the duration, the infraction number and, only if the server chose to, the moderator's name. A moderator can skip it for any one action with `--silent`. Okite does not keep a copy of the message and does not read replies. If the member's direct messages are closed, nothing is sent.
 
+**Ban appeals** (only in servers that turn them on): the answers a banned member types into the appeal form, their user ID, the infraction number, the status (pending, accepted or denied), who decided and when, and the optional note sent with a denial. They are kept so the mods can decide later and so a denied member waits 7 days before appealing again.
+
+**Watchdog**: to spot one account posting the same thing in several channels, okite keeps the last few seconds of each member's messages in memory only (a fingerprint of the text and file sizes, the channel and the message ID). Nothing of this is written to the database, and it is gone within the server's window (30 seconds by default) or on restart.
+
 **Pending ban prompts**: when a moderator bans a user, the IDs of that user's recent messages and the infraction number are kept until a moderator answers the save-or-delete prompt, or until it times out.
 
 **Server structure snapshot**: a copy of the server's channel and role list, refreshed every few minutes, used to report what changed while the bot was offline.

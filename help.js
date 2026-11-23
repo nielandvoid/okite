@@ -137,6 +137,30 @@ module.exports = {
         desc: 'notifications to the member, on by default (turn them off with `userdms off`). when on, okite DMs a member when they are banned, softbanned, kicked, muted, unmuted or warned, when their mute ends, when one of their messages is cited, or when an infraction against them is voided or deleted, with the server, what happened, the reason, the rule, how long, and the infraction number.\nthe slash form is `/userdms enabled:true`, `/userdms action:ban send:false` and `/userdms show_moderator:true`. the moderator\'s name is hidden unless you turn it on. add `--silent` (or `-s`) to a command, or `silent:true` on the slash form, to skip the DM for that one action. add `--mn <note>` or `--modnote <note>` (it takes the rest of the line, so put it last) or `modnote` on the slash form to put a note from the moderator in the DM; it also shows in that action\'s log. the DM goes out before a ban or kick, so it can still be delivered. if their DMs are closed, the moderator is told. alias: `dms`.',
         perm: 'Manage Channels'
     },
+    watchdog: {
+        summary: 'catch compromised accounts spamming the same message',
+        syntax: 'watchdog\nwatchdog on|off\nwatchdog channels <2-10>\nwatchdog seconds <5-300>\nwatchdog mute <duration>',
+        desc: 'on by default. when someone who is not staff posts the same message, with a link, a file, or 20+ characters, in 3 channels within 30 seconds, okite times them out for a day, deletes the copies, records an infraction, DMs them to secure their account, and logs it, pinging the mod role (see `modrole`).\nchange how many channels, how many seconds and how long the timeout is with the options. the usual case is a hijacked account posting a scam image everywhere.',
+        perm: 'Manage Channels'
+    },
+    honeypot: {
+        summary: 'set a trap channel that bots post in and people do not',
+        syntax: 'honeypot\nhoneypot #channel [softban|ban|mute]\nhoneypot invite on|off\nhoneypot off',
+        desc: 'anyone who is not staff and posts in the honeypot channel is softbanned by default (banned and unbanned, which removes their messages from the last day), or banned, or muted for a day. the message is deleted, an infraction is recorded and it is logged. name the channel something nobody should type in, and tell members not to.\nwith `invite on` (off by default), a softban DM includes a one-use invite that lasts 7 days, since the account was most likely compromised.',
+        perm: 'Manage Channels'
+    },
+    appeals: {
+        summary: 'let members appeal bans, mutes, kicks and warnings from their DM',
+        syntax: 'appeals\nappeals setup #channel\nappeals off\nappeals add <question> | <hint>\nappeals remove <number>\nappeals block @user\nappeals unblock @user',
+        desc: 'when on, the DM for a ban, mute, kick or warning gets an Appeal button. it opens a form titled like "r/Server - Appeal Ban" with the server\'s questions (up to 7, each up to 45 characters with an optional hint; `{action}` in a question becomes banned, muted, kicked or warned). with no questions of its own, each action gets two default questions worded for it. the answers are posted in the appeal channel with the infraction and Accept / Deny / Deny + Block buttons for anyone with Ban Members. accept lifts the ban or mute, voids the infraction and DMs them; deny DMs them with an optional note, and they can appeal that action again after 7 days; deny and block also stops them appealing at all (undo with `appeals unblock`). appeals need the action\'s DM on (`userdms`), and a --silent action has no appeal button. alias: `appeal`.',
+        perm: 'Manage Channels'
+    },
+    modrole: {
+        summary: 'pick the role pinged on urgent alerts',
+        syntax: 'modrole\nmodrole @role\nmodrole off',
+        desc: 'sets a role that okite pings on alerts that need someone now: a compromised account caught by the watchdog, and the save-attachments prompts after a ban.',
+        perm: 'Manage Channels'
+    },
     bancleanup: {
         summary: 'clear a banned user\'s messages once their transcript is built',
         syntax: 'bancleanup\nbancleanup on|off [days]',

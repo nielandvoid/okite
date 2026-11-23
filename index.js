@@ -48,17 +48,22 @@ let client = new Client({ ...clientOptions, intents: FULL_INTENTS });
 
 const mongoose = require('mongoose');
 const Guild = require('./models/guild');
+const Appeal = require('./models/appeal');
 const { auditGuild, reportText } = require('./audit');
 
 if (process.env.MONGODB_URI) {
-    mongoose.connect(process.env.MONGODB_URI)
+    mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000, socketTimeoutMS: 20_000, heartbeatFrequencyMS: 10_000 })
         .then(() => console.log('connected to mongodb database'))
         .catch(err => console.error('mongodb connection error:', err));
+    mongoose.connection.on('disconnected', () => console.warn('mongodb disconnected'));
+    mongoose.connection.on('reconnected', () => console.log('mongodb reconnected'));
 }
 
 const { createClient } = require('@supabase/supabase-js');
 const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
-    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+        global: { fetch: (url, init = {}) => fetch(url, { ...init, signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) }) }
+    })
     : null;
 
 const rules = require('./rules.json')
@@ -104,7 +109,7 @@ try {
 
 const suppressedDeletes = new Set();
 
-const COLORS = { brand: 0xf1ede4, info: 0x6fa8ff, action: 0xffe27a, danger: 0xff8b9a, good: 0x7ee8a8, muted: 0xc49bff, deepred: 0xe5484d, periwinkle: 0x8ea2ff, lime: 0xb6e87a };
+const COLORS = { brand: 0xf1ede4, info: 0x6fa8ff, action: 0xffe27a, danger: 0xff8b9a, good: 0x7ee8a8, muted: 0xc49bff, deepred: 0xe5484d, periwinkle: 0x8ea2ff, lime: 0xb6e87a, coffee: 0x6f4e37 };
 
 const LOG_KINDS = {
     general: 'logChannelId',
@@ -392,11 +397,13 @@ async function sendLog(guild, entry) {
     const uploaded = uploads.map(u => new AttachmentBuilder(u.buffer, { name: u.name }));
     const files = [...uploaded, ...transcript];
     const useContainer = USE_CONTAINERS && entry.embed !== true;
+    const pingRole = entry.pingRole || null;
+    const mentions = pingRole ? { parse: [], roles: [pingRole] } : { parse: [] };
     let payload;
     if (useContainer) {
-        payload = { flags: MessageFlags.IsComponentsV2, components: [renderLogContainer(shown), ...(buttons ? [buttons] : [])], allowedMentions: { parse: [] } };
+        payload = { flags: MessageFlags.IsComponentsV2, components: [...(pingRole ? [textBlock(`<@&${pingRole}>`)] : []), renderLogContainer(shown), ...(buttons ? [buttons] : [])], allowedMentions: mentions };
     } else {
-        payload = { embeds: [renderLogEmbed(shown)], allowedMentions: { parse: [] } };
+        payload = { ...(pingRole ? { content: `<@&${pingRole}>` } : {}), embeds: [renderLogEmbed(shown)], allowedMentions: mentions };
         if (buttons) payload.components = [buttons];
     }
     if (files.length) payload.files = files;
@@ -407,7 +414,7 @@ async function sendLog(guild, entry) {
     });
     // container fails -> send embed
     if (!sent && useContainer) {
-        const fallback = { embeds: [renderLogEmbed(shown)], allowedMentions: { parse: [] }, ...(buttons ? { components: [buttons] } : {}), ...(files.length ? { files } : {}) };
+        const fallback = { ...(pingRole ? { content: `<@&${pingRole}>` } : {}), embeds: [renderLogEmbed(shown)], allowedMentions: mentions, ...(buttons ? { components: [buttons] } : {}), ...(files.length ? { files } : {}) };
         sent = await logChannel.send(fallback).catch(err => { console.error('log send error (embed fallback):', err.message); return null; });
     }
     return !!sent;
@@ -980,7 +987,7 @@ const DM_STYLE = {
 
 const quoteBlock = (text) => String(text).split('\n').map(l => `> ${l}`).join('\n');
 
-async function dmUser({ guild, user, action, reason, rule, duration, infraction, moderator, excerpt, original, modNote, silent }) {
+async function dmUser({ guild, user, action, reason, rule, duration, infraction, moderator, excerpt, original, modNote, note, silent }) {
     const settings = await getUserDms(guild.id);
     const style = DM_STYLE[action];
     if (!settings.enabled || !settings.actions.includes(style.category)) return 'off';
@@ -997,7 +1004,7 @@ async function dmUser({ guild, user, action, reason, rule, duration, infraction,
     const container = renderLogContainer({
         title: style.title(`**${String(guild.name).replace(/([\\*_~|`>])/g, '\\$1')}**`),
         color,
-        description: style.note,
+        description: note ?? style.note,
         plainTitle: true,
         icon: guild.iconURL?.({ extension: 'png', size: 256 }) ?? undefined,
         banner: guild.bannerURL?.({ extension: 'png', size: 1024 }) ?? undefined,
@@ -1009,14 +1016,16 @@ async function dmUser({ guild, user, action, reason, rule, duration, infraction,
             { name: 'Mod Note:', value: modNote ? quoteBlock(clip(String(modNote), 500)) : '', section: true, plain: true }
         ]
     });
+    const appealKind = APPEAL_KIND_OF[action];
+    const appealRow = appealKind && (await getExtras(guild.id)).appeals.enabled ? [appealButton(guild.id, appealKind, infraction?.case_number)] : [];
     try {
-        await user.send({ flags: V2_FLAG, components: [container], allowedMentions: { parse: [] } });
+        await user.send({ flags: V2_FLAG, components: [container, ...appealRow], allowedMentions: { parse: [] } });
         return 'sent';
     } catch (err) {
         if (err.code === 50007) return 'failed';
     }
     const embed = new EmbedBuilder().setColor(color).setTitle(title).setFooter({ text: guild.name, iconURL: guild.iconURL?.() ?? undefined }).setTimestamp();
-    if (style.note) embed.setDescription(style.note);
+    if (note ?? style.note) embed.setDescription(note ?? style.note);
     const fields = [];
     if (reason) fields.push({ name: action === 'void' ? 'Why?' : 'Reason', value: clip(String(reason), 1000) });
     if (original) fields.push({ name: 'Original reason', value: clip(String(original), 500) });
@@ -1028,7 +1037,7 @@ async function dmUser({ guild, user, action, reason, rule, duration, infraction,
     if (modNote) fields.push({ name: 'Mod note', value: clip(String(modNote), 500) });
     if (fields.length) embed.addFields(fields);
     try {
-        await user.send({ embeds: [embed], allowedMentions: { parse: [] } });
+        await user.send({ embeds: [embed], components: appealRow, allowedMentions: { parse: [] } });
         return 'sent';
     } catch {
         return 'failed';
@@ -2257,6 +2266,8 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         notify?.(NO_LOG_NOTE);
         return;
     }
+    const modRoleId = (await getExtras(guild.id)).modRoleId;
+    const modPing = modRoleId ? { components: [textBlock(`<@&${modRoleId}>`)], content: { content: `<@&${modRoleId}>` }, mentions: { parse: [], roles: [modRoleId] } } : { components: [], content: {}, mentions: { parse: [] } };
     const mePerms = logChannel.permissionsFor?.(guild.members.me);
     const canPost = !!mePerms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles]);
     const streaming = cleanup && canPost;
@@ -2420,12 +2431,12 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
                 const container = containerHeader(new ContainerBuilder().setAccentColor(COLORS.danger), `## Attachments archived from ${target.username}\n${facts}`, avatar || okiteIcon());
                 container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`**Files**\n${codeBlock(files)}`));
                 container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(warning));
-                prompt = await logChannel.send({ flags: V2_FLAG, components: [container, decide], allowedMentions: { parse: [] } }).catch(err => { console.error('archive prompt container error:', err.message); return null; });
+                prompt = await logChannel.send({ flags: V2_FLAG, components: [...modPing.components, container, decide], allowedMentions: modPing.mentions }).catch(err => { console.error('archive prompt container error:', err.message); return null; });
             }
             if (!prompt) {
                 const embed = new EmbedBuilder().setColor(COLORS.danger).setTitle(`Attachments archived from ${target.username}`).setDescription([facts, `**Files**\n${files}`, warning].join('\n\n')).setTimestamp();
                 if (avatar) embed.setThumbnail(avatar);
-                await logChannel.send({ embeds: [embed], components: [decide], allowedMentions: { parse: [] } }).catch(err => console.error('archive prompt error:', err.message));
+                await logChannel.send({ ...modPing.content, embeds: [embed], components: [decide], allowedMentions: modPing.mentions }).catch(err => console.error('archive prompt error:', err.message));
             }
         }
         notify?.(`cleaned up: ${messages.length} message${messages.length === 1 ? '' : 's'} deleted from chat${archiveNote}. the transcript is in the log channel.`);
@@ -2481,9 +2492,9 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         new ButtonBuilder().setCustomId(`ban_skip:${pending.id}`).setLabel('don\'t save').setStyle(ButtonStyle.Secondary)
     );
     let sent = USE_CONTAINERS
-        ? await logChannel.send({ flags: V2_FLAG, components: [promptContainer(), row], allowedMentions: { parse: [] } }).catch(err => { console.error('ban prompt container error:', err.message); return null; })
+        ? await logChannel.send({ flags: V2_FLAG, components: [...modPing.components, promptContainer(), row], allowedMentions: modPing.mentions }).catch(err => { console.error('ban prompt container error:', err.message); return null; })
         : null;
-    if (!sent) sent = await logChannel.send({ embeds: [promptEmbed()], components: [row], allowedMentions: { parse: [] } });
+    if (!sent) sent = await logChannel.send({ ...modPing.content, embeds: [promptEmbed()], components: [row], allowedMentions: modPing.mentions });
     await supabase.from('pending_bans').update({ prompt_channel_id: sent.channelId, prompt_message_id: sent.id }).eq('id', pending.id);
 }
 
@@ -2774,9 +2785,8 @@ async function handleAutocomplete(interaction) {
 }
 
 function renderAudit(guild, result) {
-    const tone = { critical: COLORS.danger, high: COLORS.danger, medium: COLORS.action, low: COLORS.info };
-    const worstSev = result.findings[0]?.sev;
-    const container = new ContainerBuilder().setAccentColor(worstSev ? tone[worstSev] : COLORS.good);
+    const container = new ContainerBuilder();
+    const heading = { critical: 'CRITICAL', high: 'HIGH', medium: 'MED', low: 'LOW' };
     const tally = ['critical', 'high', 'medium', 'low'].map(s => `${result.counts[s]} ${s}`).join(' / ');
     containerHeader(container, `## security audit\n${plainText(guild.name)}\n-# ${result.stats.roles} roles, ${result.stats.channels} channels checked\n**${tally}**`, okiteIcon());
     let used = 200;
@@ -2784,8 +2794,8 @@ function renderAudit(guild, result) {
     for (const sev of ['critical', 'high', 'medium', 'low']) {
         const group = result.findings.filter(f => f.sev === sev);
         if (!group.length) continue;
-        const body = group.map(f => [`**${f.title}**`, ...f.lines.slice(0, 6).map(l => `> ${l}`)].join('\n')).join('\n');
-        const block = `### ${sev}\n${body}`;
+        const body = group.map(f => [`\`-\` ${f.title}`, ...f.lines.slice(0, 6).map(l => `> ${l}`)].join('\n')).join('\n');
+        const block = `# \`${heading[sev]}\`\n${body}`;
         if (used + block.length > MESSAGE_TEXT_BUDGET) { hidden += group.length; continue; }
         used += block.length;
         container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(block));
@@ -2812,6 +2822,8 @@ async function refuseInfractionButton(interaction, isMod) {
 async function handleInteraction(interaction) {
     if (interaction.isButton?.() && interaction.customId.startsWith('suggest_')) return;
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
+    if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appeal|appealnext|appealmodal):/.test(interaction.customId)) return handleAppealStart(interaction);
+    if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appealdecide|appealdeny):/.test(interaction.customId)) return handleAppealDecision(interaction);
 
     if (!interaction.guild) {
         return interaction.reply({ content: 'okite is a server-only utility.', ephemeral: true });
@@ -2824,7 +2836,7 @@ async function handleInteraction(interaction) {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
 
-        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
+        if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
             return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
 
@@ -2986,6 +2998,137 @@ async function handleInteraction(interaction) {
             return replied;
         }
 
+        if (commandName === 'watchdog') {
+            const current = (await getExtras(guildId)).watchdog;
+            const enabled = options.getBoolean('enabled') ?? null;
+            const channels = options.getInteger('channels') ?? null;
+            const seconds = options.getInteger('seconds') ?? null;
+            const mute = options.getString('mute') ?? null;
+            if (enabled === null && channels === null && seconds === null && mute === null) return interaction.reply({ content: describeExtras.watchdog(current), ephemeral: true });
+            const muteLength = mute ? parseDuration(mute) : null;
+            if (mute && (!muteLength || muteLength.permanent || muteLength.ms < 60_000 || muteLength.ms > MAX_TIMEOUT_MS)) {
+                return interaction.reply({ content: 'the mute has to be between 1 minute and 27 days, like `1h` or `1d`.', ephemeral: true });
+            }
+            const update = {};
+            if (enabled !== null) update.watchdogEnabled = enabled;
+            if (channels !== null) update.watchdogChannels = Math.min(10, Math.max(2, channels));
+            if (seconds !== null) update.watchdogSeconds = Math.min(300, Math.max(5, seconds));
+            if (muteLength) update.watchdogMute = mute.trim().toLowerCase();
+            await setExtras(guildId, update);
+            const now = (await getExtras(guildId)).watchdog;
+            logInBackground(interaction.guild, {
+                title: 'watchdog changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current.enabled ? `on / ${current.channels} channels / ${current.seconds}s / ${current.mute}` : 'off', inline: true },
+                    { name: 'now', value: now.enabled ? `on / ${now.channels} channels / ${now.seconds}s / ${now.mute}` : 'off', inline: true }
+                ]
+            });
+            return interaction.reply({ content: describeExtras.watchdog(now), ephemeral: true });
+        }
+
+        if (commandName === 'honeypot') {
+            const current = (await getExtras(guildId)).honeypot;
+            const channel = options.getChannel('channel') ?? null;
+            const action = options.getString('action') ?? null;
+            const off = options.getBoolean('off') ?? false;
+            const invite = options.getBoolean('invite') ?? null;
+            if (!channel && !action && !off && invite === null) return interaction.reply({ content: describeExtras.honeypot(current), ephemeral: true });
+            if (action && !['softban', 'ban', 'mute'].includes(action)) return interaction.reply({ content: 'the action is `softban`, `ban` or `mute`.', ephemeral: true });
+            if (channel && !channel.isTextBased?.()) return interaction.reply({ content: 'the honeypot has to be a text channel.', ephemeral: true });
+            const update = off ? { honeypotChannelId: null } : {};
+            if (!off && channel) update.honeypotChannelId = channel.id;
+            if (!off && action) update.honeypotAction = action;
+            if (!off && invite !== null) update.honeypotInvite = invite;
+            await setExtras(guildId, update);
+            const now = (await getExtras(guildId)).honeypot;
+            const me = interaction.guild.members.me;
+            const target = now.channelId ? interaction.guild.channels.cache.get(now.channelId) : null;
+            const missing = [];
+            if (target && !target.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageMessages])) missing.push('View Channel and Manage Messages in that channel');
+            if (target && now.action !== 'mute' && !me.permissions.has(PermissionFlagsBits.BanMembers)) missing.push('Ban Members');
+            if (target && now.action === 'mute' && !me.permissions.has(PermissionFlagsBits.ModerateMembers)) missing.push('Timeout Members');
+            if (target && now.action === 'softban' && now.invite && !me.permissions.has(PermissionFlagsBits.CreateInstantInvite)) missing.push('Create Invite');
+            logInBackground(interaction.guild, {
+                title: 'honeypot changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current.channelId ? `<#${current.channelId}> / ${current.action}` : 'off', inline: true },
+                    { name: 'now', value: now.channelId ? `<#${now.channelId}> / ${now.action}` : 'off', inline: true }
+                ]
+            });
+            return interaction.reply({ content: `${describeExtras.honeypot(now)}${missing.length ? `\nokite is missing ${missing.join(', ')}, so it cannot act yet.` : ''}`, ephemeral: true });
+        }
+
+        if (commandName === 'modrole') {
+            const current = (await getExtras(guildId)).modRoleId;
+            const role = options.getRole?.('role') ?? options.getString?.('role') ?? null;
+            const off = options.getBoolean('off') ?? false;
+            if (!role && !off) return interaction.reply({ content: describeExtras.modRole(current), ephemeral: true, allowedMentions: { parse: [] } });
+            const roleId = off ? null : (typeof role === 'string' ? role : role.id);
+            await setExtras(guildId, { modRoleId: roleId });
+            logInBackground(interaction.guild, {
+                title: 'mod role changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'before', value: current ? `<@&${current}>` : 'none', inline: true },
+                    { name: 'now', value: roleId ? `<@&${roleId}>` : 'none', inline: true }
+                ]
+            });
+            return interaction.reply({ content: describeExtras.modRole(roleId), ephemeral: true, allowedMentions: { parse: [] } });
+        }
+
+        if (commandName === 'appeals') {
+            const sub = options.getSubcommand();
+            const current = (await getExtras(guildId)).appeals;
+            if (sub === 'list') return interaction.reply({ content: describeExtras.appeals(current), ephemeral: true, allowedMentions: { parse: [] } });
+            const update = {};
+            if (sub === 'setup') {
+                const channel = options.getChannel('channel');
+                if (!channel?.isTextBased?.()) return interaction.reply({ content: 'appeals need a text channel.', ephemeral: true });
+                if (!channel.permissionsFor(interaction.guild.members.me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+                    return interaction.reply({ content: `okite cannot send messages in <#${channel.id}>. give it View Channel and Send Messages there first.`, ephemeral: true });
+                }
+                update.appealsEnabled = true;
+                update.appealsChannelId = channel.id;
+            } else if (sub === 'off') {
+                update.appealsEnabled = false;
+            } else if (sub === 'add') {
+                const list = current.custom ? [...current.questions] : [];
+                if (list.length >= MAX_APPEAL_QUESTIONS) return interaction.reply({ content: `there are already ${MAX_APPEAL_QUESTIONS} questions, the most an appeal can have. remove one first.`, ephemeral: true });
+                const label = (options.getString('question') || '').trim();
+                if (!label || label.length > 45) return interaction.reply({ content: 'a question is 1 to 45 characters (discord\'s limit for a form label). put the longer part in the hint.', ephemeral: true });
+                list.push({ label, hint: (options.getString('hint') || '').trim().slice(0, 100) });
+                update.appealQuestions = list;
+            } else if (sub === 'block' || sub === 'unblock') {
+                const user = options.getUser('user');
+                if (!user) return interaction.reply({ content: 'name a user.', ephemeral: true });
+                update.appealBlocked = sub === 'block' ? [...new Set([...current.blocked, user.id])] : current.blocked.filter(id => id !== user.id);
+            } else if (sub === 'remove') {
+                if (!current.custom) return interaction.reply({ content: 'these are the default questions. add your own with `/appeals add` and they replace the defaults.', ephemeral: true });
+                const list = [...current.questions];
+                const n = options.getInteger('number');
+                if (!Number.isInteger(n) || n < 1 || n > list.length) return interaction.reply({ content: `pick a number from 1 to ${list.length}.`, ephemeral: true });
+                list.splice(n - 1, 1);
+                update.appealQuestions = list;
+            }
+            await setExtras(guildId, update);
+            const now = (await getExtras(guildId)).appeals;
+            logInBackground(interaction.guild, {
+                title: 'appeals changed',
+                kind: 'server',
+                fields: [
+                    { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'change', value: sub, inline: true },
+                    { name: 'now', value: now.enabled && now.channelId ? `on / <#${now.channelId}> / ${now.questions.length} question${now.questions.length === 1 ? '' : 's'}` : 'off', inline: true }
+                ]
+            });
+            return interaction.reply({ content: describeExtras.appeals(now), ephemeral: true, allowedMentions: { parse: [] } });
+        }
+
         if (commandName === 'timezone') {
             const input = options.getString('zone');
             const current = await getTimezone(guildId);
@@ -3064,7 +3207,16 @@ async function handleInteraction(interaction) {
             await interaction.reply({ content: 'pinging…', ephemeral: true });
             const apiMs = Date.now() - started;
 
-            const timed = async (fn) => { const t = Date.now(); try { await fn(); return `${Date.now() - t} ms`; } catch { return 'error'; } };
+            const timed = async (fn) => {
+                const t = Date.now();
+                try {
+                    await Promise.race([fn(), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8_000))]);
+                    return `${Date.now() - t} ms`;
+                } catch (err) {
+                    console.warn(`ping check failed after ${Date.now() - t}ms:`, err?.message || err);
+                    return err?.message === 'timeout' ? 'no answer in 8s' : 'error';
+                }
+            };
             const [supabaseMs, mongoMs] = await Promise.all([
                 supabase ? timed(async () => { const { error } = await supabase.from('infractions').select('case_number').limit(1); if (error) throw error; }) : null,
                 process.env.MONGODB_URI ? timed(() => Guild.findOne({ guildId: '0' }).lean()) : null
@@ -3078,7 +3230,7 @@ async function handleInteraction(interaction) {
                 ...(!supabaseMs && !mongoMs ? ['**database:** not configured'] : []),
                 `**uptime:** ${formatDuration(process.uptime() * 1000)}`
             ];
-            return interaction.editReply(lines.join('\n'));
+            return interaction.editReply(lines.join('\n')).catch(err => console.error(`ping edit failed after ${Date.now() - started}ms:`, err?.message || err));
         }
 
         if (commandName === 'logchannels') {
@@ -4444,7 +4596,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
-    userdms: 'userdms', dms: 'userdms', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
@@ -4463,7 +4615,7 @@ const prefixCache = new Map();
 const HELP_GROUPS = [
     ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'bancleanup', 'timezone', 'rule']],
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule']],
     ['utility', ['ping', 'help', 'security-audit']]
 ];
 const COMMAND_HELP = require('./help');
@@ -4954,6 +5106,72 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         return { commandName: 'bancleanup', subcommand, values };
     }
 
+    if (name === 'modrole') {
+        const first = args[0]?.toLowerCase();
+        if (!first || first === 'show') return { commandName: 'modrole', subcommand, values };
+        if (first === 'off' || first === 'none') { values.off = true; return { commandName: 'modrole', subcommand, values }; }
+        const roleId = args[0].match(/^<@&(\d+)>$/)?.[1] || (/^\d{17,20}$/.test(args[0]) ? args[0] : null);
+        if (!roleId || !message.guild.roles.cache.has(roleId)) return fail(`syntax: \`${PREFIX}modrole @role\`, \`${PREFIX}modrole off\` or \`${PREFIX}modrole\` to show`);
+        values.role = roleId;
+        return { commandName: 'modrole', subcommand, values };
+    }
+
+    if (name === 'watchdog') {
+        const first = args[0]?.toLowerCase();
+        if (!first || first === 'show') return { commandName: 'watchdog', subcommand, values };
+        if (ON_OFF[first]) values.enabled = ON_OFF[first] === 'on';
+        else if (['channels', 'seconds'].includes(first) && /^\d+$/.test(args[1] || '')) values[first] = Number(args[1]);
+        else if (first === 'mute' && args[1]) values.mute = args[1];
+        else return fail(`syntax: \`${PREFIX}watchdog\` to show, \`${PREFIX}watchdog on|off\`, \`${PREFIX}watchdog channels <2-10>\`, \`${PREFIX}watchdog seconds <5-300>\` or \`${PREFIX}watchdog mute <duration>\``);
+        return { commandName: 'watchdog', subcommand, values };
+    }
+
+    if (name === 'honeypot') {
+        const first = args[0]?.toLowerCase();
+        if (!first || first === 'show') return { commandName: 'honeypot', subcommand, values };
+        if (first === 'off') { values.off = true; return { commandName: 'honeypot', subcommand, values }; }
+        for (let i = 0; i < args.length; i++) {
+            const word = args[i];
+            const channel = resolvePrefixChannel(message.guild, word);
+            if (channel) values.channel = channel;
+            else if (['softban', 'ban', 'mute'].includes(word.toLowerCase())) values.action = word.toLowerCase();
+            else if (word.toLowerCase() === 'invite' && ON_OFF[args[i + 1]?.toLowerCase()]) values.invite = ON_OFF[args[++i].toLowerCase()] === 'on';
+            else return fail(`syntax: \`${PREFIX}honeypot\` to show, \`${PREFIX}honeypot #channel [softban|ban|mute]\`, \`${PREFIX}honeypot invite on|off\` or \`${PREFIX}honeypot off\``);
+        }
+        return { commandName: 'honeypot', subcommand, values };
+    }
+
+    if (name === 'appeals') {
+        const first = args[0]?.toLowerCase();
+        const syntax = `syntax: \`${PREFIX}appeals\` to list, \`${PREFIX}appeals setup #channel\`, \`${PREFIX}appeals off\`, \`${PREFIX}appeals add <question> | <hint>\` or \`${PREFIX}appeals remove <number>\``;
+        if (!first || first === 'list' || first === 'show') return { commandName: 'appeals', subcommand: 'list', values };
+        if (first === 'off') return { commandName: 'appeals', subcommand: 'off', values };
+        if (first === 'setup' || resolvePrefixChannel(message.guild, args[0])) {
+            const channel = resolvePrefixChannel(message.guild, first === 'setup' ? args[1] : args[0]);
+            if (!channel) return fail(syntax);
+            values.channel = channel;
+            return { commandName: 'appeals', subcommand: 'setup', values };
+        }
+        if (first === 'add') {
+            const [question, hint] = restAfter(argText, 1).split('|').map(t => t.trim());
+            if (!question) return fail(syntax);
+            values.question = question;
+            values.hint = hint || null;
+            return { commandName: 'appeals', subcommand: 'add', values };
+        }
+        if (['block', 'unblock'].includes(first)) {
+            const user = await resolvePrefixUser(args[1]);
+            if (!user) return fail(`syntax: \`${PREFIX}appeals ${first} @user\``);
+            values.user = user;
+            return { commandName: 'appeals', subcommand: first, values };
+        }
+        if (['remove', 'rm', 'delete'].includes(first) && /^\d+$/.test(args[1] || '')) {
+            values.number = Number(args[1]);
+            return { commandName: 'appeals', subcommand: 'remove', values };
+        }
+        return fail(syntax);
+    }
+
     if (name === 'userdms') {
         const first = args[0]?.toLowerCase();
         const state = ON_OFF[args[1]?.toLowerCase()];
@@ -5123,6 +5341,10 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'prefix') return !subcommand || subcommand === 'show';
     if (commandName === 'autopurge' || commandName === 'autocorrect' || commandName === 'requirerule' || commandName === 'messagelogs') return values.enabled === undefined || values.enabled === null;
     if (commandName === 'userdms') return values.enabled === undefined && values.action === undefined && values.show_moderator === undefined;
+    if (commandName === 'watchdog') return ['enabled', 'channels', 'seconds', 'mute'].every(k => values[k] === undefined);
+    if (commandName === 'honeypot') return !values.channel && !values.action && !values.off && values.invite === undefined;
+    if (commandName === 'modrole') return !values.role && !values.off;
+    if (commandName === 'appeals') return subcommand === 'list';
     if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
     return false;
@@ -5816,11 +6038,418 @@ client.on(Events.GuildMemberRemove, safe(async (member) => {
     });
 }));
 
+const MAX_APPEAL_QUESTIONS = 7;
+const APPEAL_COOLDOWN_MS = 7 * 86400e3;
+const APPEAL_KINDS = {
+    ban: { name: 'Ban', did: 'banned', undo: 'unban you', types: ['ban'], lifted: 'You have been unbanned and can rejoin the server.' },
+    mute: { name: 'Mute', did: 'muted', undo: 'lift the mute', types: ['mute'], lifted: 'Your timeout has been lifted.' },
+    kick: { name: 'Kick', did: 'kicked', undo: 'remove the kick', types: ['kick', 'softban'], lifted: 'The kick has been removed from your record.' },
+    warn: { name: 'Warning', did: 'warned', undo: 'remove the warning', types: ['manual', 'lookup'], lifted: 'The warning has been removed from your record.' }
+};
+const APPEAL_KIND_OF = { ban: 'ban', softban: 'kick', kick: 'kick', mute: 'mute', warn: 'warn', cite: 'warn' };
+const defaultQuestions = (kind) => [{ label: `Why were you ${APPEAL_KINDS[kind].did}?`, hint: '' }, { label: `Why should we ${APPEAL_KINDS[kind].undo}?`, hint: '' }];
+const questionsFor = (appeals, kind) => (appeals.custom ? appeals.questions : defaultQuestions(kind)).map(q => ({ label: q.label.replace(/\{action\}/gi, APPEAL_KINDS[kind].did), hint: q.hint }));
+const extrasCache = new Map();
+
+async function getExtras(guildId) {
+    if (extrasCache.has(guildId)) return extrasCache.get(guildId);
+    const doc = process.env.MONGODB_URI ? await Guild.findOne({ guildId }).lean().catch(() => null) : null;
+    const src = doc ?? config;
+    const custom = Array.isArray(src.appealQuestions) && src.appealQuestions.length > 0;
+    const extras = {
+        watchdog: { enabled: src.watchdogEnabled !== false, channels: src.watchdogChannels || 3, seconds: src.watchdogSeconds || 30, mute: src.watchdogMute || '1d' },
+        honeypot: { channelId: src.honeypotChannelId || null, action: src.honeypotAction || 'softban', invite: !!src.honeypotInvite },
+        appeals: { enabled: !!src.appealsEnabled, channelId: src.appealsChannelId || null, questions: custom ? src.appealQuestions.map(q => ({ label: q.label, hint: q.hint || '' })) : [], custom, blocked: Array.isArray(src.appealBlocked) ? src.appealBlocked : [] },
+        modRoleId: src.modRoleId || null
+    };
+    extrasCache.set(guildId, extras);
+    return extras;
+}
+
+async function setExtras(guildId, update) {
+    if (process.env.MONGODB_URI) await Guild.findOneAndUpdate({ guildId }, update, { upsert: true, new: true });
+    else {
+        Object.assign(config, update);
+        fs.writeFileSync('./config.json', JSON.stringify(config, null, 4));
+    }
+    extrasCache.clear();
+}
+
+const isStaff = (member) => Boolean(member?.permissions?.has(PermissionFlagsBits.ManageMessages) || member?.permissions?.has(PermissionFlagsBits.Administrator));
+
+const recentPosts = new Map();
+const caughtUntil = new Map();
+
+function postSignature(message) {
+    const text = String(message.content || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const files = [...message.attachments.values()].map(a => `${a.size}:${a.contentType}`).sort().join(',');
+    return files || /https?:\/\//.test(text) || text.length >= 20 ? `${text}|${files}` : null;
+}
+
+async function checkCompromised(message) {
+    const settings = (await getExtras(message.guildId)).watchdog;
+    if (!settings.enabled) return false;
+    const signature = postSignature(message);
+    if (!signature) return false;
+    const key = `${message.guildId}:${message.author.id}`;
+    const now = Date.now();
+    if ((caughtUntil.get(key) ?? 0) > now) {
+        suppressedDeletes.add(message.id);
+        message.delete().catch(() => null);
+        return true;
+    }
+    const kept = (recentPosts.get(key) || []).filter(p => now - p.at < settings.seconds * 1000);
+    kept.push({ signature, channelId: message.channelId, messageId: message.id, at: now, content: message.content, files: [...message.attachments.values()].map(describeAttachment) });
+    recentPosts.delete(key);
+    recentPosts.set(key, kept.slice(-30));
+    if (recentPosts.size > 5000) recentPosts.delete(recentPosts.keys().next().value);
+    const same = kept.filter(p => p.signature === signature);
+    if (new Set(same.map(p => p.channelId)).size < settings.channels) return false;
+    caughtUntil.set(key, now + 60_000);
+    recentPosts.delete(key);
+    await punishCompromised(message, same, settings);
+    return true;
+}
+
+async function punishCompromised(message, posts, settings) {
+    const { guild, author } = message;
+    const duration = parseDuration(settings.mute) || parseDuration('1d');
+    const channels = [...new Set(posts.map(p => p.channelId))];
+    const reason = `compromised account: the same message in ${channels.length} channels within ${settings.seconds}s`;
+    const member = message.member ?? await guild.members.fetch(author.id).catch(() => null);
+    const muted = member?.moderatable ? await member.timeout(Math.min(duration.ms ?? MAX_TIMEOUT_MS, MAX_TIMEOUT_MS), reason).then(() => true).catch(() => false) : false;
+    await Promise.all(posts.map(p => {
+        suppressedDeletes.add(p.messageId);
+        return guild.channels.cache.get(p.channelId)?.messages.delete(p.messageId).catch(() => null);
+    }));
+    const infraction = muted ? await createInfraction({ guild_id: guild.id, target_user_id: author.id, moderator_id: client.user.id, rule_id: null, rule_text_snapshot: reason, action_type: 'mute', ...durationColumns(duration) }) : null;
+    const dm = muted ? await dmUser({ guild, user: author, action: 'mute', reason: 'your account posted the same message in several channels at once, which usually means it was taken over. change your password and turn on 2FA, then ask the mods to lift the timeout.', duration, infraction }) : 'off';
+    logInBackground(guild, {
+        title: `compromised account caught${infraction ? ` / infraction #${infraction.case_number}` : ''}`,
+        kind: 'moderation',
+        color: COLORS.coffee,
+        pingRole: (await getExtras(guild.id)).modRoleId,
+        fields: [
+            { name: 'user', value: who(author), inline: true },
+            { name: 'action', value: muted ? `timed out for ${duration.label}` : 'not timed out (their role is too high, or okite lacks Timeout Members)', inline: true },
+            { name: 'channels', value: channels.map(id => `<#${id}>`).join(' '), inline: true },
+            { name: 'deleted', value: `${posts.length} message${posts.length === 1 ? '' : 's'}`, inline: true },
+            { name: 'DM', value: dm === 'sent' ? 'sent' : dm === 'failed' ? 'their DMs are closed' : '', inline: true },
+            { name: 'message', value: clip(posts[0].content, 1000), code: Boolean(posts[0].content) },
+            { name: 'files', value: posts[0].files.join('\n') }
+        ]
+    });
+}
+
+async function rejoinInvite(guild, preferredId) {
+    const me = guild.members.me;
+    const everyone = guild.roles.everyone;
+    const candidates = [guild.rulesChannel, guild.systemChannel, guild.channels.cache.get(preferredId), ...guild.channels.cache.filter(c => c.isTextBased?.() && !c.isThread?.()).values()].filter(Boolean);
+    for (const channel of candidates) {
+        if (!channel.permissionsFor(me)?.has(PermissionFlagsBits.CreateInstantInvite)) continue;
+        if (!channel.permissionsFor(everyone)?.has(PermissionFlagsBits.ViewChannel)) continue;
+        const invite = await channel.createInvite({ maxAge: 7 * 86400, maxUses: 1, unique: true, reason: 'honeypot softban: rejoin link' }).catch(() => null);
+        if (invite) return invite.url;
+    }
+    return null;
+}
+
+const HONEYPOT_RESULT = {
+    softban: 'softbanned; their messages from the last day were removed',
+    ban: 'banned; their messages from the last day were removed',
+    mute: 'timed out for 1 day'
+};
+
+async function checkHoneypot(message) {
+    const honeypot = (await getExtras(message.guildId)).honeypot;
+    if (!honeypot.channelId || message.channelId !== honeypot.channelId) return false;
+    const { guild, author } = message;
+    suppressedDeletes.add(message.id);
+    message.delete().catch(() => null);
+    const action = ['ban', 'mute'].includes(honeypot.action) ? honeypot.action : 'softban';
+    const reason = 'posted in the honeypot channel';
+    const key = `${guild.id}:${author.id}`;
+    if ((caughtUntil.get(key) ?? 0) > Date.now()) return true;
+    caughtUntil.set(key, Date.now() + 60_000);
+    const member = message.member ?? await guild.members.fetch(author.id).catch(() => null);
+    const mute = parseDuration('1d');
+    const able = action === 'mute' ? member?.moderatable : (member ? member.bannable : true);
+    const invite = able && action === 'softban' && honeypot.invite ? await rejoinInvite(guild, message.channelId) : null;
+    const dm = able ? await dmUser({ guild, user: author, action, reason: 'you posted in a channel that is a trap for spam bots.', note: invite ? `We assume the account was compromised. Rejoin if recovered:\n> ${invite}` : undefined, duration: action === 'mute' ? mute : action === 'ban' ? { permanent: true, label: 'Permanent' } : undefined }) : 'off';
+    let done = false;
+    if (able && action === 'mute') done = await member.timeout(mute.ms, reason).then(() => true).catch(() => false);
+    else if (able) {
+        botBans.add(key);
+        if (action === 'softban') botUnbans.add(key);
+        done = await guild.members.ban(author, { deleteMessageSeconds: 86400, reason }).then(() => true).catch(() => false);
+        if (done && action === 'softban') await guild.members.unban(author, 'honeypot softban: lifting straight away').catch(() => null);
+        setTimeout(() => { botBans.delete(key); botUnbans.delete(key); }, 30000).unref();
+    }
+    const infraction = done ? await createInfraction({ guild_id: guild.id, target_user_id: author.id, moderator_id: client.user.id, rule_id: null, rule_text_snapshot: 'triggered the honeypot', action_type: action, ...(action === 'mute' ? durationColumns(mute) : {}) }) : null;
+    logInBackground(guild, {
+        title: `honeypot triggered${infraction ? ` / infraction #${infraction.case_number}` : ''}`,
+        kind: 'moderation',
+        color: COLORS.danger,
+        fields: [
+            { name: 'user', value: who(author), inline: true },
+            { name: 'action', value: done ? HONEYPOT_RESULT[action] : `could not ${action} them (their role is too high, or okite lacks the permission)`, inline: true },
+            { name: 'channel', value: `<#${message.channelId}>`, inline: true },
+            { name: 'DM', value: dm === 'sent' ? (invite ? 'sent, with a one-use rejoin invite' : 'sent') : dm === 'failed' ? 'their DMs are closed' : '', inline: true },
+            { name: 'message', value: clip(message.content, 1000), code: Boolean(message.content) },
+            { name: 'files', value: [...message.attachments.values()].map(describeAttachment).join('\n') }
+        ]
+    });
+    return true;
+}
+
+const appealMemory = new Map();
+const appealDrafts = new Map();
+const useAppealDb = () => Boolean(process.env.MONGODB_URI);
+const appealStore = {
+    async create(data) {
+        if (useAppealDb()) return (await Appeal.create(data)).toObject();
+        const record = { ...data, _id: require('node:crypto').randomUUID(), status: 'pending', createdAt: new Date() };
+        appealMemory.set(String(record._id), record);
+        return record;
+    },
+    async get(id) {
+        if (useAppealDb()) return Appeal.findById(id).lean().catch(() => null);
+        return appealMemory.get(String(id)) ?? null;
+    },
+    async update(id, patch) {
+        if (useAppealDb()) return Appeal.updateOne({ _id: id }, patch).catch(err => console.error('appeal update error:', err.message));
+        const record = appealMemory.get(String(id));
+        if (record) Object.assign(record, patch);
+    },
+    async open(guildId, userId, kind) {
+        if (useAppealDb()) return Appeal.findOne({ guildId, userId, kind, status: 'pending' }).lean().catch(() => null);
+        return [...appealMemory.values()].find(a => a.guildId === guildId && a.userId === userId && a.kind === kind && a.status === 'pending') ?? null;
+    },
+    async lastDenied(guildId, userId, kind) {
+        if (useAppealDb()) return Appeal.findOne({ guildId, userId, kind, status: 'denied' }).sort({ decidedAt: -1 }).lean().catch(() => null);
+        return [...appealMemory.values()].filter(a => a.guildId === guildId && a.userId === userId && a.kind === kind && a.status === 'denied').sort((x, y) => y.decidedAt - x.decidedAt)[0] ?? null;
+    }
+};
+
+const appealButton = (guildId, kind, caseNumber) => new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`appeal:${guildId}:${kind}:${caseNumber || 0}`).setLabel('Appeal').setStyle(ButtonStyle.Secondary));
+
+async function appealTarget(guildId, userId, kind, caseNumber) {
+    if (!supabase) return null;
+    if (caseNumber) {
+        const row = await getInfraction(guildId, caseNumber);
+        return row && row.target_user_id === userId ? row : null;
+    }
+    const { data } = await supabase.from('infractions').select('*').eq('guild_id', guildId).eq('target_user_id', userId).in('action_type', APPEAL_KINDS[kind].types).order('created_at', { ascending: false }).limit(1);
+    return data?.[0] ?? null;
+}
+
+function appealModal(guild, questions, kind, caseNumber, part) {
+    const split = questions.length > 5;
+    const modal = new ModalBuilder()
+        .setCustomId(`appealmodal:${guild.id}:${kind}:${caseNumber || 0}:${part}`)
+        .setTitle(clip(`${guild.name} - Appeal ${APPEAL_KINDS[kind].name}${split ? ` (${part}/2)` : ''}`, 45));
+    questions.slice((part - 1) * 5, part * 5).forEach((q, i) => {
+        const input = new TextInputBuilder()
+            .setCustomId(`q${(part - 1) * 5 + i}`)
+            .setLabel(clip(q.label, 45))
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(1000);
+        if (q.hint) input.setPlaceholder(clip(q.hint, 100));
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+    });
+    return modal;
+}
+
+async function handleAppealStart(interaction) {
+    const [step, guildId, kindTag, caseTag, part] = interaction.customId.split(':');
+    const kind = APPEAL_KINDS[kindTag] ? kindTag : 'ban';
+    const caseNumber = Number(caseTag) || 0;
+    const say = (content, extra = {}) => (interaction.replied || interaction.deferred ? interaction.followUp({ content, ...extra }) : interaction.reply({ content, ...extra })).catch(() => null);
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return say('okite is not in that server any more, so the appeal cannot be sent.');
+    const { appeals } = await getExtras(guildId);
+    if (!appeals.enabled || !appeals.channelId) return say(`${plainText(guild.name)} is not taking appeals right now.`);
+    const userId = interaction.user.id;
+    if (appeals.blocked.includes(userId)) return say(`you can no longer appeal in ${plainText(guild.name)}.`);
+    const questions = questionsFor(appeals, kind);
+    const draftKey = `${guildId}:${userId}:${kind}`;
+
+    if (step === 'appeal' || step === 'appealnext') {
+        if (step === 'appeal') {
+            if (kind === 'ban' && !(await guild.bans.fetch({ user: userId, force: true }).catch(() => null))) return say(`you are not banned from ${plainText(guild.name)}.`);
+            if (kind === 'mute') {
+                const member = await guild.members.fetch(userId).catch(() => null);
+                if (!(member?.communicationDisabledUntilTimestamp > Date.now())) return say(`you are not muted in ${plainText(guild.name)} any more.`);
+            }
+            const target = await appealTarget(guildId, userId, kind, caseNumber);
+            if (target?.status === 'voided') return say(`that ${APPEAL_KINDS[kind].name.toLowerCase()} was already voided.`);
+            if (await appealStore.open(guildId, userId, kind)) return say('you already have an appeal for this waiting. you will get a DM when the mods decide.');
+            const denied = await appealStore.lastDenied(guildId, userId, kind);
+            if (denied?.decidedAt && Date.now() - new Date(denied.decidedAt).getTime() < APPEAL_COOLDOWN_MS) {
+                return say(`your last appeal was denied. you can appeal again <t:${Math.floor((new Date(denied.decidedAt).getTime() + APPEAL_COOLDOWN_MS) / 1000)}:R>.`);
+            }
+            appealDrafts.delete(draftKey);
+        } else if (!appealDrafts.has(draftKey)) {
+            return say('that appeal timed out. press the appeal button again to start over.');
+        }
+        return interaction.showModal(appealModal(guild, questions, kind, caseNumber, step === 'appeal' ? 1 : 2));
+    }
+
+    const draft = appealDrafts.get(draftKey) ?? { answers: {}, at: Date.now() };
+    for (let i = 0; i < questions.length; i++) {
+        let value = null;
+        try { value = interaction.fields.getTextInputValue(`q${i}`); } catch { value = null; }
+        if (value != null) draft.answers[i] = value;
+    }
+    draft.at = Date.now();
+    appealDrafts.set(draftKey, draft);
+    for (const [k, d] of appealDrafts) if (Date.now() - d.at > 30 * 60e3) appealDrafts.delete(k);
+
+    if (part === '1' && questions.length > 5) {
+        const next = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`appealnext:${guildId}:${kind}:${caseNumber}`).setLabel('Continue').setStyle(ButtonStyle.Primary));
+        return say('part 1 is saved. press continue for the last questions.', { components: [next] });
+    }
+    appealDrafts.delete(draftKey);
+    return submitAppeal(interaction, guild, appeals, kind, caseNumber, questions, draft.answers, say);
+}
+
+async function submitAppeal(interaction, guild, appeals, kind, caseNumber, questions, answers, say) {
+    const user = interaction.user;
+    const channel = guild.channels.cache.get(appeals.channelId) ?? await guild.channels.fetch(appeals.channelId).catch(() => null);
+    if (!channel?.isTextBased?.()) return say('the server\'s appeal channel is missing, so the appeal could not be sent. try again later.');
+    const target = await appealTarget(guild.id, user.id, kind, caseNumber);
+    const record = await appealStore.create({
+        guildId: guild.id,
+        userId: user.id,
+        kind,
+        caseNumber: target?.case_number ?? null,
+        answers: questions.map((q, i) => ({ question: q.label, answer: String(answers[i] ?? '') }))
+    });
+    const sent = await channel.send(renderAppeal({ record, user, target, decision: null })).catch(err => { console.error('appeal post error:', err.message); return null; });
+    if (!sent) {
+        await appealStore.update(record._id, { status: 'failed' });
+        return say('okite could not post the appeal in the server\'s appeal channel. try again later.');
+    }
+    await appealStore.update(record._id, { channelId: sent.channelId, messageId: sent.id });
+    return say(`your appeal was sent to the mods of ${plainText(guild.name)}. you will get a DM when they decide.`);
+}
+
+function renderAppeal({ record, user, target, decision }) {
+    const kind = APPEAL_KINDS[record.kind] ? record.kind : 'ban';
+    const reason = target ? (target.rule_id && target.rule_id !== 'custom' && target.reason && target.reason !== 'not specified' ? target.reason : target.rule_text_snapshot) : null;
+    const facts = [
+        `> user: <@${record.userId}> / ${user?.username ?? record.userId} / \`${record.userId}\``,
+        target ? `> infraction: \`#${target.case_number}\` / ${APPEAL_KINDS[kind].did} <t:${Math.floor(new Date(target.created_at).getTime() / 1000)}:R>${target.status === 'voided' ? ' / voided' : ''}` : '> infraction: none on record',
+        ...(reason ? [`> reason: ${clip(String(reason).replace(/\s+/g, ' '), 300)}`] : [])
+    ].join('\n');
+    const container = containerHeader(new ContainerBuilder(), `${kind === 'warn' ? 'warning' : kind} appeal\n${facts}`, user?.displayAvatarURL?.() || okiteIcon());
+    const body = record.answers.map(a => `\`-\` ${a.question}\n${quoteBlock(clip(a.answer || '(no answer)', 900))}`).join('\n');
+    if (body) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(clip(body, 3000)));
+    const when = Math.floor(new Date(record.createdAt ?? Date.now()).getTime() / 1000);
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(decision ? `-# sent <t:${when}:R> / ${decision}` : `-# sent <t:${when}:R>`));
+    const components = [container];
+    if (!decision) {
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`appealdecide:accept:${record._id}`).setLabel('Accept').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`appealdecide:deny:${record._id}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId(`appealdecide:block:${record._id}`).setLabel('Deny + Block').setStyle(ButtonStyle.Secondary)
+        ));
+    }
+    return { flags: V2_FLAG, components, allowedMentions: { parse: [] } };
+}
+
+async function handleAppealDecision(interaction) {
+    const [step, verdict, id] = interaction.customId.split(':');
+    const perms = interaction.memberPermissions;
+    if (!(perms?.has(PermissionFlagsBits.BanMembers) || perms?.has(PermissionFlagsBits.Administrator))) {
+        return interaction.reply({ content: 'you need Ban Members to decide appeals.', ephemeral: true });
+    }
+    const record = await appealStore.get(id);
+    if (!record || record.guildId !== interaction.guildId) return interaction.reply({ content: 'that appeal could not be found.', ephemeral: true });
+    if (record.status !== 'pending') return interaction.reply({ content: `that appeal was already ${record.status}.`, ephemeral: true });
+    if (step === 'appealdecide' && verdict !== 'accept') {
+        const input = new TextInputBuilder().setCustomId('note').setLabel('Note to the user (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(500);
+        return interaction.showModal(new ModalBuilder().setCustomId(`appealdeny:${verdict}:${id}`).setTitle(verdict === 'block' ? 'Deny + Block' : 'Deny appeal').addComponents(new ActionRowBuilder().addComponents(input)));
+    }
+    const kind = APPEAL_KINDS[record.kind] ? record.kind : 'ban';
+    const accepting = verdict === 'accept';
+    const blocking = verdict === 'block';
+    const note = step === 'appealdeny' ? (interaction.fields.getTextInputValue('note') || '').trim() : '';
+    const guild = interaction.guild;
+    const user = await client.users.fetch(record.userId).catch(() => null);
+    if (accepting) {
+        if (kind === 'ban') {
+            const key = `${guild.id}:${record.userId}`;
+            botUnbans.add(key);
+            setTimeout(() => botUnbans.delete(key), 30000).unref();
+            await guild.members.unban(record.userId, `appeal accepted by ${interaction.user.username}`).catch(err => { if (err.code !== 10026) throw err; });
+            await endPunishments(guild.id, record.userId, 'ban');
+        }
+        if (kind === 'mute') {
+            const member = await guild.members.fetch(record.userId).catch(() => null);
+            if (member?.communicationDisabledUntilTimestamp > Date.now()) await member.timeout(null, `appeal accepted by ${interaction.user.username}`).catch(() => null);
+            await endPunishments(guild.id, record.userId, 'mute');
+        }
+        if (supabase && record.caseNumber) {
+            await supabase.from('infractions').update({ status: 'voided', voided_by: interaction.user.id, voided_at: new Date().toISOString(), void_reason: 'appeal accepted' }).eq('guild_id', guild.id).eq('case_number', record.caseNumber);
+        }
+    }
+    if (blocking) {
+        const { appeals } = await getExtras(guild.id);
+        await setExtras(guild.id, { appealBlocked: [...new Set([...appeals.blocked, record.userId])] });
+    }
+    const status = accepting ? 'accepted' : 'denied';
+    await appealStore.update(record._id, { status, decidedBy: interaction.user.id, decidedAt: new Date(), decisionNote: note || null });
+    const target = supabase && record.caseNumber ? await getInfraction(guild.id, record.caseNumber) : null;
+    const server = `**${plainText(guild.name)}**`;
+    const dmText = accepting
+        ? `Your appeal to ${server} was accepted.\n${APPEAL_KINDS[kind].lifted}`
+        : [`Your appeal to ${server} was denied.`, ...(note ? ['Note from the mods:', quoteBlock(note), ''] : []), blocking ? 'You can no longer appeal in this server.' : 'You can appeal again in 7 days.'].join('\n');
+    const container = containerHeader(new ContainerBuilder(), dmText, guild.iconURL?.({ extension: 'png', size: 256 }) ?? okiteIcon());
+    const dmSent = user ? await user.send({ flags: V2_FLAG, components: [container], allowedMentions: { parse: [] } }).then(() => true).catch(() => false) : false;
+    const decision = `${blocking ? 'denied and blocked' : status} by ${interaction.user.username}${dmSent ? '' : ' / could not DM them'}${note ? ` / note: ${clip(note, 200)}` : ''}`;
+    await interaction.update(renderAppeal({ record: { ...record, status }, user, target, decision })).catch(err => console.error('appeal update error:', err.message));
+    logInBackground(guild, {
+        title: `${kind === 'warn' ? 'warning' : kind} appeal ${blocking ? 'denied and blocked' : status}${record.caseNumber ? ` / infraction #${record.caseNumber}` : ''}`,
+        kind: 'moderation',
+        color: accepting ? COLORS.good : COLORS.danger,
+        fields: [
+            { name: 'user', value: user ? who(user) : `<@${record.userId}>`, inline: true },
+            { name: 'moderator', value: who(interaction.user), inline: true },
+            { name: 'DM', value: dmSent ? 'sent' : 'could not DM them', inline: true },
+            { name: 'note', value: note }
+        ]
+    });
+}
+
+const describeExtras = {
+    watchdog: (c) => c.enabled
+        ? `watchdog is on: the same message (with a link, a file, or 20+ characters) in ${c.channels} channels within ${c.seconds}s gets the account timed out for ${c.mute} and the copies deleted.`
+        : 'watchdog is off. turn it on with `/watchdog enabled:true`.',
+    honeypot: (h) => h.channelId
+        ? `honeypot is <#${h.channelId}>: anyone who is not staff and posts there gets ${h.action === 'mute' ? 'timed out for 1 day' : `${h.action === 'ban' ? 'banned' : 'softbanned'}, which removes their messages from the last day`}.`
+        + (h.channelId && h.action === 'softban' ? (h.invite ? ' their DM includes a one-use invite to rejoin, in case the account was compromised.' : ' turn on `invite` to DM them a one-use invite to rejoin.') : '')
+        : 'no honeypot channel. set one with `/honeypot channel:#channel`.',
+    appeals: (a) => [
+        a.enabled && a.channelId ? `appeals are on and go to <#${a.channelId}>. ban, mute, kick and warning DMs get an appeal button.` : 'appeals are off. turn them on with `/appeals setup channel:#channel`.',
+        a.custom ? 'questions (`{action}` becomes banned, muted, kicked or warned):' : 'questions (the defaults, worded for each action, until you add your own):',
+        ...(a.custom ? a.questions : defaultQuestions('ban')).map((q, i) => `\`${i + 1}\` ${q.label}${q.hint ? ` / hint: ${q.hint}` : ''}`),
+        ...(a.blocked.length ? [`blocked from appealing: ${a.blocked.length} user${a.blocked.length === 1 ? '' : 's'}`] : [])
+    ].join('\n'),
+    modRole: (id) => (id ? `mod role is <@&${id}>. it is pinged on compromised-account alerts and attachment prompts.` : 'no mod role. set one with `/modrole role:@role`.')
+};
+
 client.on(Events.MessageCreate, safe(async (message) => {
     if (!message.guild || message.author?.bot) return;
     if (await messageLogsOn(message.guildId)) {
         indexMessage(message);
         cacheMessage(message);
+    }
+    if (!isStaff(message.member)) {
+        const handled = await checkHoneypot(message).catch(err => { console.error('honeypot error:', err.message); return false; })
+            || await checkCompromised(message).catch(err => { console.error('watchdog error:', err.message); return false; });
+        if (handled) return;
     }
     if (!process.env.TRACE_PREFIX) return handlePrefixMessage(message);
     const received = Date.now();

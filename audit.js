@@ -145,7 +145,7 @@ async function auditGuild(guild, { logChannelIds = [] } = {}) {
     const hooks = await guild.fetchWebhooks().catch(() => null);
     if (hooks) {
         const made = [...hooks.values()].filter(h => h.owner && !h.owner.bot);
-        if (made.length) add('medium', 'server', `webhooks made by members (${made.length}): anyone holding the URL can post as them`, cap(made.map(h => `${h.name} / #${guild.channels.cache.get(h.channelId)?.name ?? h.channelId} / ${h.owner.username}`)));
+        if (made.length) add('medium', 'server', `webhook${made.length === 1 ? '' : 's'} (${made.length}): anyone holding the URL can post as ${made.length === 1 ? 'it' : 'them'}`, cap(made.map(h => `${h.name} / #${guild.channels.cache.get(h.channelId)?.name ?? h.channelId} / ${h.owner.username}`)));
     } else unchecked.push('webhooks (needs Manage Webhooks)');
 
     const widget = await guild.fetchWidgetSettings().catch(() => null);
@@ -185,6 +185,7 @@ async function auditGuild(guild, { logChannelIds = [] } = {}) {
             if (!hits.length) continue;
             const isUser = ow.type === OverwriteType.Member;
             if (ow.id === everyone.id) {
+                if (!everyoneCan(c, P.ViewChannel)) continue;
                 dangerous.push({ sev: worst(hits.map(h => h[2])), line: `${named(c)}: @everyone allowed ${list(hits)}` });
             } else if (hits.some(h => ['Manage Channels', 'Manage Permissions', 'Manage Webhooks'].includes(h[0])) && (isUser || !(target?.permissions.has(P.ManageChannels)))) {
                 delegated.push(`${named(c)}: ${isUser ? 'user ' : ''}${targetName} allowed ${list(hits.filter(h => ['Manage Channels', 'Manage Permissions', 'Manage Webhooks'].includes(h[0])))}`);
@@ -194,7 +195,7 @@ async function auditGuild(guild, { logChannelIds = [] } = {}) {
     if (dangerous.length) add(worst(dangerous.map(d => d.sev)), 'channels', `channel overrides that give @everyone privileged permissions (${dangerous.length})`, cap(dangerous.map(d => d.line)));
     if (delegated.length) add('medium', 'channels', `channel-level management delegated by override (${delegated.length})`, cap(delegated));
 
-    const postable = bare.filter(c => (c.id === guild.rulesChannelId || c.id === guild.publicUpdatesChannelId || c.type === ChannelType.GuildAnnouncement || PUBLIC_ONLY_NAME.test(c.name)) && c.isTextBased?.() && everyoneCan(c, P.SendMessages));
+    const postable = bare.filter(c => (c.id === guild.rulesChannelId || c.id === guild.publicUpdatesChannelId || c.type === ChannelType.GuildAnnouncement || PUBLIC_ONLY_NAME.test(c.name)) && c.isTextBased?.() && everyoneCan(c, P.ViewChannel) && everyoneCan(c, P.SendMessages));
     if (postable.length) add('medium', 'channels', `read-only style channels where @everyone can send (${postable.length})`, cap(postable.map(named)));
 
     const memberOverrides = bare.filter(c => [...(c.permissionOverwrites?.cache.values() ?? [])].some(o => o.type === OverwriteType.Member));

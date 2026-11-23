@@ -108,6 +108,50 @@ const commands = [
         .addBooleanOption(o => o.setName("show_moderator").setDescription("show the moderator's name in the DM (off by default)")),
 
     new SlashCommandBuilder()
+        .setName("watchdog")
+        .setDescription(help.watchdog.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addBooleanOption(o => o.setName("enabled").setDescription("on or off (no option shows the state)"))
+        .addIntegerOption(o => o.setName("channels").setDescription("how many channels the same message has to hit (2 to 10, default 3)").setMinValue(2).setMaxValue(10))
+        .addIntegerOption(o => o.setName("seconds").setDescription("within how many seconds (5 to 300, default 30)").setMinValue(5).setMaxValue(300))
+        .addStringOption(o => o.setName("mute").setDescription("how long the timeout is, like 1h or 1d (default 1d)").setMaxLength(10)),
+
+    new SlashCommandBuilder()
+        .setName("honeypot")
+        .setDescription(help.honeypot.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addChannelOption(o => o.setName("channel").setDescription("the trap channel nobody should post in"))
+        .addStringOption(o => o.setName("action").setDescription("what happens to whoever posts there (default softban)")
+            .addChoices({ name: "softban (ban and unban, which removes their messages from the last day)", value: "softban" }, { name: "ban", value: "ban" }, { name: "mute for 1 day", value: "mute" }))
+        .addBooleanOption(o => o.setName("invite").setDescription("softban only: DM them a one-use invite to rejoin, in case the account was compromised"))
+        .addBooleanOption(o => o.setName("off").setDescription("turn the honeypot off")),
+
+    new SlashCommandBuilder()
+        .setName("modrole")
+        .setDescription(help.modrole.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addRoleOption(o => o.setName("role").setDescription("the role to ping on alerts"))
+        .addBooleanOption(o => o.setName("off").setDescription("stop pinging a role")),
+
+    new SlashCommandBuilder()
+        .setName("appeals")
+        .setDescription(help.appeals.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addSubcommand(sub => sub.setName("setup").setDescription("turn appeals on and pick the channel they go to")
+            .addChannelOption(o => o.setName("channel").setDescription("where appeals are posted for the mods").setRequired(true)))
+        .addSubcommand(sub => sub.setName("off").setDescription("stop taking appeals"))
+        .addSubcommand(sub => sub.setName("add").setDescription("add a question to the appeal form (up to 7, {action} becomes banned/muted/kicked/warned)")
+            .addStringOption(o => o.setName("question").setDescription("the question, up to 45 characters").setRequired(true).setMaxLength(45))
+            .addStringOption(o => o.setName("hint").setDescription("grey example text inside the answer box, up to 100 characters").setMaxLength(100)))
+        .addSubcommand(sub => sub.setName("remove").setDescription("remove a question")
+            .addIntegerOption(o => o.setName("number").setDescription("the question's number from /appeals list").setRequired(true).setMinValue(1).setMaxValue(7)))
+        .addSubcommand(sub => sub.setName("block").setDescription("stop a user from appealing")
+            .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true)))
+        .addSubcommand(sub => sub.setName("unblock").setDescription("let a blocked user appeal again")
+            .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true)))
+        .addSubcommand(sub => sub.setName("list").setDescription("show the appeal settings and questions")),
+
+    new SlashCommandBuilder()
         .setName("bancleanup")
         .setDescription(help.bancleanup.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
