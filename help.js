@@ -56,13 +56,13 @@ module.exports = {
     purge: {
         summary: 'delete the latest messages in this channel',
         syntax: 'purge <count> [user ...]',
-        desc: 'deletes recent messages.\nthe latest <count> messages are removed (max 1000), optionally only those from up to 10 users. as a reply, `purge` deletes from the replied message through the command itself. messages under 14 days old go in bulk, older ones one by one (slower). ranges over 200 need confirmation, and the purge is logged before anything is deleted.',
+        desc: 'deletes recent messages.\nthe latest <count> messages are removed (max 1000), optionally only those from up to 10 users, given as mentions, ids or names (a name asks you to confirm who you meant). as a reply, `purge` deletes from the replied message through the command itself. messages under 14 days old go in bulk, older ones one by one (slower). ranges over 200 need confirmation, and the purge is logged before anything is deleted.',
         perm: 'Manage Messages'
     },
     'obliterate': {
         summary: 'delete everything a user has sent, in every channel',
         syntax: 'obliterate <user>',
-        desc: 'deletes every message from one user that okite can reach: all channels, threads and voice chats, all the way back.\nit asks you to confirm first, writes to the log channel before anything is deleted, and posts a transcript when it ends. messages under 14 days old go in bulk, older ones one at a time, so a large server can take hours. you can stop it from the progress message. only one runs per server at a time. slash command only.',
+        desc: 'deletes every message from one user that okite can reach: all channels, threads and voice chats, all the way back.\nit asks you to confirm first, writes to the log channel before anything is deleted, and posts a transcript when it ends. messages under 14 days old go in bulk, older ones one at a time, so a large server can take hours. you can stop it from the progress message. only one runs per server at a time. works as a prefix command too: `!obliterate @user`, or as a reply to one of their messages. there the confirm and progress messages are visible in the channel, not private.',
         perm: 'Manage Messages'
     },
     cite: {

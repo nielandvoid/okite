@@ -1034,7 +1034,7 @@ async function runModAction(interaction, kind) {
     });
     if (infraction && supabase && logReady) {
         runBanSnapshot({
-            guild, target, infraction, moderatorId: interaction.user.id, deleteAfter: true,
+            guild, target, infraction, moderatorId: interaction.user.id, deleteAfter: true, channelId: interaction.channelId,
             notify: (text, files) => interaction.followUp({ content: text, ephemeral: true, ...(files ? { files } : {}) }).catch(() => null)
         }).catch(err => console.error('softban snapshot error:', err));
     }
@@ -1666,7 +1666,7 @@ async function scanUserRefs(guild, userId, days = 7, deadline = Infinity) {
     return found;
 }
 
-const SCAN_CAP_COVERED_MS = 3000;
+const SCAN_CAP_COVERED_MS = 20000;
 const SCAN_CAP_OPEN_MS = 45000;
 
 async function collectUserRefs(guild, userId, days = 7) {
@@ -1679,7 +1679,7 @@ async function collectUserRefs(guild, userId, days = 7) {
     return [...byId.values()].slice(0, 3000);
 }
 
-async function fetchSnapshot(guild, refs) {
+async function fetchSnapshot(guild, refs, onFound) {
     const found = new Map();
     const byChannel = new Map();
     for (const ref of refs) {
@@ -1699,7 +1699,9 @@ async function fetchSnapshot(guild, refs) {
                 if (found.has(id)) continue;
                 const batch = await channel.messages.fetch({ after: String(BigInt(id) - 1n), limit: 100 }).catch(() => null);
                 if (!batch) continue;
-                for (const m of batch.values()) if (wanted.has(m.id)) found.set(m.id, m);
+                const hits = [];
+                for (const m of batch.values()) if (wanted.has(m.id) && !found.has(m.id)) { found.set(m.id, m); hits.push(m); }
+                if (hits.length && onFound) await onFound(channel, hits);
             }
         }
     };
@@ -1845,28 +1847,31 @@ function prefetchAttachments(attachments) {
 
 const snowflakeTime = (id) => Number(BigInt(id) >> 22n) + 1420070400000;
 
-async function sweepUserMessages(guild, userId, days, capMs, onFound) {
+async function sweepUserMessages(guild, userId, days, capMs, onFound, firstChannelId) {
     const since = Date.now() - days * 24 * 60 * 60 * 1000;
     const deadline = Date.now() + capMs;
     const me = guild.members.me;
     const channels = [...guild.channels.cache.values()]
         .filter(c => c.isTextBased() && c.viewable && c.permissionsFor(me)?.has(PermissionFlagsBits.ReadMessageHistory) && !(c.lastMessageId && snowflakeTime(c.lastMessageId) < since))
         .sort((x, y) => (BigInt(y.lastMessageId || 0) > BigInt(x.lastMessageId || 0) ? 1 : -1));
+    const scan = async (channel) => {
+        let before;
+        for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10) && Date.now() < deadline; page++) {
+            const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+            if (!batch?.size) break;
+            const mine = [...batch.values()].filter(m => m.author.id === userId && m.createdTimestamp >= since);
+            if (mine.length) await onFound(channel, mine);
+            const oldest = batch.last();
+            if (oldest.createdTimestamp < since) break;
+            before = oldest.id;
+        }
+    };
+    const first = channels.find(c => c.id === firstChannelId);
+    if (first) await scan(first);
+    const rest = channels.filter(c => c !== first);
     let next = 0;
     const worker = async () => {
-        while (next < channels.length && Date.now() < deadline) {
-            const channel = channels[next++];
-            let before;
-            for (let page = 0; page < Math.min(40, Math.ceil(days / 7) * 10) && Date.now() < deadline; page++) {
-                const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
-                if (!batch?.size) break;
-                const mine = [...batch.values()].filter(m => m.author.id === userId && m.createdTimestamp >= since);
-                if (mine.length) await onFound(channel, mine);
-                const oldest = batch.last();
-                if (oldest.createdTimestamp < since) break;
-                before = oldest.id;
-            }
-        }
+        while (next < rest.length && Date.now() < deadline) await scan(rest[next++]);
     };
     await Promise.all(Array.from({ length: 8 }, worker));
 }
@@ -2006,7 +2011,7 @@ const noLogButtons = (userId, caseNumber) => new ActionRowBuilder().addComponent
 );
 
 // after ban; transcript, attachments prompt
-async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAfter, notify }) {
+async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAfter, notify, channelId }) {
     const settings = await getAutoPurge(guild.id);
     const cleanup = settings.banCleanup && deleteAfter;
     const days = cleanup ? settings.banCleanupDays : 7;
@@ -2032,6 +2037,7 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
     let missing = 0;
     let prefetched = null;
     let deleted = false;
+    let deleteFailures = 0;
     if (streaming) {
         const prefetcher = createPrefetcher();
         const seen = new Set();
@@ -2049,36 +2055,35 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
         const indexed = await getIndexedRefs(guild.id, target.id);
         const indexedAt = Date.now();
         let quickCount = 0;
-        if (indexed.length) {
-            const cache = await lookupCachedMessages(guild.id, indexed.map(r => r.m));
-            const quick = indexed.filter(r => !r.a && cache.has(r.m));
-            const slow = indexed.filter(r => r.a || !cache.has(r.m));
-            quickCount = quick.length;
+        const handleIndexed = async (refs, cache) => {
+            if (!refs.length) return;
+            const quick = refs.filter(r => !r.a && cache.has(r.m));
+            const slow = refs.filter(r => r.a || !cache.has(r.m));
+            quickCount += quick.length;
             const quickByChannel = new Map();
             for (const r of quick) quickByChannel.set(r.c, [...(quickByChannel.get(r.c) || []), r.m]);
-            const lanes = [...quickByChannel].map(async ([channelId, ids]) => {
-                const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
+            const lanes = [...quickByChannel].map(async ([quickChannelId, ids]) => {
+                const channel = guild.channels.cache.get(quickChannelId) ?? await guild.channels.fetch(quickChannelId).catch(() => null);
                 if (!channel) return;
                 ids.forEach(id => seen.add(id));
                 collected.push(...ids.map(id => cachedAsMessage(cache.get(id), guild)));
                 await eraseMessages(channel, ids);
             });
-            if (slow.length) {
-                lanes.push(fetchSnapshot(guild, slow).then(async (snap) => {
-                    missing = snap.missing;
-                    const byChannel = new Map();
-                    for (const m of snap.messages) byChannel.set(m.channelId, [...(byChannel.get(m.channelId) || []), m]);
-                    await Promise.all([...byChannel].map(([channelId, list]) => take(guild.channels.cache.get(channelId) ?? list[0].channel, list)));
-                }));
-            }
+            if (slow.length) lanes.push(fetchSnapshot(guild, slow, take).then((snap) => { missing += snap.missing; }));
             await Promise.all(lanes);
+        };
+        if (indexed.length) {
+            const cache = await lookupCachedMessages(guild.id, indexed.map(r => r.m));
+            await handleIndexed(indexed.filter(r => r.c === channelId), cache);
+            await handleIndexed(indexed.filter(r => r.c !== channelId), cache);
         }
         const indexedDone = Date.now();
         const covered = indexed.length > 0 && days <= INDEX_WINDOW_MS / 86400000;
-        await sweepUserMessages(guild, target.id, days, covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS, take);
+        await sweepUserMessages(guild, target.id, days, covered ? SCAN_CAP_COVERED_MS : SCAN_CAP_OPEN_MS, take, channelId);
         console.log(`ban cleanup #${infraction.case_number}: index lookup ${indexedAt - startedAt}ms (${indexed.length} refs, ${quickCount} deleted without fetching), indexed deletes done at ${indexedDone - startedAt}ms, sweep done at ${Date.now() - startedAt}ms, ${collected.length} messages total`);
         forgetCachedMessagesBy(guild.id, target.id);
         if (supabase) await supabase.from('message_index').delete().eq('guild_id', guild.id).eq('user_id', target.id);
+        deleteFailures = removal.errors;
         messages = collected.sort((x, y) => x.createdTimestamp - y.createdTimestamp);
         prefetched = prefetcher.done();
         deleted = true;
@@ -2104,7 +2109,8 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
             { name: 'user', value: who(target), inline: true },
             { name: 'messages recovered', value: String(messages.length), inline: true },
             { name: 'unavailable', value: String(missing), inline: true },
-            { name: 'attachments', value: attachments.length ? `${attachments.length} (${formatSize(totalBytes)})` : 'none', inline: true }
+            { name: 'attachments', value: attachments.length ? `${attachments.length} (${formatSize(totalBytes)})` : 'none', inline: true },
+            { name: 'not deleted', value: deleteFailures ? `${deleteFailures} (okite may lack Manage Messages in those channels)` : '' }
         ],
         file: { name: transcriptName, content: transcriptText }
     };
@@ -2228,6 +2234,14 @@ async function runBanSnapshot({ guild, target, infraction, moderatorId, deleteAf
 
 restoreSpool();
 setInterval(flushAll, 3000).unref();
+
+process.on('unhandledRejection', (reason) => console.error('unhandled rejection:', reason));
+process.on('uncaughtException', (err) => console.error('uncaught exception:', err));
+client.on(Events.Error, (err) => console.error('client error:', err.message));
+client.on(Events.ShardError, (err, id) => console.error(`shard ${id} error:`, err.message));
+client.on(Events.ShardDisconnect, (event, id) => console.warn(`shard ${id} disconnected (code ${event.code})`));
+client.on(Events.ShardReconnecting, (id) => console.warn(`shard ${id} reconnecting`));
+client.on(Events.ShardResume, (id, replayed) => console.log(`shard ${id} resumed, ${replayed} events replayed`));
 
 process.on('exit', () => { if (heartbeatEnabled) { lastSeenLocal = Date.now(); saveStateNow(); } spoolSync(); });
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -3225,6 +3239,7 @@ async function handleInteraction(interaction) {
                     infraction,
                     moderatorId: interaction.user.id,
                     deleteAfter: true,
+                    channelId: interaction.channelId,
                     notify: (text, files) => interaction.followUp({ content: text, ephemeral: true, ...(files ? { files } : {}) }).catch(() => null)
                 }).catch(err => console.error('ban snapshot error:', err));
             }
@@ -4056,7 +4071,7 @@ const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
     setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
-    audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit',
+    audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
 };
@@ -4451,6 +4466,13 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         values.urgent = values.urgent ?? false;
         values.reason = restAfter(argText, i) || null;
         return { commandName: name, subcommand, values };
+    }
+
+    if (name === 'obliterate') {
+        const { user } = await takeUser(0);
+        if (!user) return fail(`syntax: \`${PREFIX}obliterate <user>\` (or reply to their message)`);
+        values.user = user;
+        return { commandName: 'obliterate', subcommand, values };
     }
 
     if (name === 'setnick') {
@@ -4870,8 +4892,16 @@ async function runPrefixMessage(message) {
             if (count < 1 || count > 1000) return reply('pick a count between 1 and 1000.');
             const filterUsers = [];
             for (const token of rest.slice(1, 11)) {
-                const u = await resolvePrefixUser(token);
-                if (!u) return reply(`syntax: \`${PREFIX}purge <count> [user ...]\` (up to 10 users, mentions or ids)`);
+                let u = await resolvePrefixUser(token);
+                if (!u && /^[\p{L}\p{N}_.'-]{2,32}$/u.test(token) && !token.startsWith('-')) {
+                    const hits = await findSimilarMembers(message.guild, token);
+                    if (hits.length) {
+                        const chosen = await confirmUser(message, hits, 'purging messages from');
+                        if (!chosen) return;
+                        u = chosen.user;
+                    }
+                }
+                if (!u) return reply(`syntax: \`${PREFIX}purge <count> [user ...]\` (up to 10 users: mentions, ids or names)`);
                 if (!filterUsers.some(f => f.id === u.id)) filterUsers.push(u);
             }
 
@@ -4897,7 +4927,7 @@ async function runPrefixMessage(message) {
     if (parsed.error && message.__suggest) {
         const hint = message.__suggest;
         message.__suggest = null;
-        const chosen = await confirmUser(message, hint.matches, { ban: 'banning', unban: 'unbanning', kick: 'kicking', softban: 'softbanning', mute: 'muting', unmute: 'unmuting' }[command] ?? 'using');
+        const chosen = await confirmUser(message, hint.matches, { ban: 'banning', unban: 'unbanning', kick: 'kicking', softban: 'softbanning', mute: 'muting', unmute: 'unmuting', obliterate: 'obliterating messages from' }[command] ?? 'using');
         if (!chosen) return;
         const words = argText.trim().split(/\s+/);
         words[hint.index] = chosen.user.id;
