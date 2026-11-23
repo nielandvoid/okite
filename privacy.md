@@ -8,7 +8,7 @@ Okite is a Discord moderation bot. Server admins add it to their own server, con
 
 Message logging is **off by default** and is turned on per server by an admin with `/messagelogs`. While it is off, the message index and the message cache described below are not collected for that server, edits and deletes are not logged, and a ban makes no transcript. Everything else below (settings, infractions and the rest) is stored regardless.
 
-Okite only reads what Discord sends to bots in servers it has been added to. It does not read direct messages and it does not use presence data. The only direct messages it ever sends are the user notifications described below, and only in servers whose admins turn them on.
+Okite only reads what Discord sends to bots in servers it has been added to. It does not read direct messages and it does not use presence data. The only direct messages it ever sends are the user notifications described below, which an admin can turn off per server.
 
 **Server settings** (per server): log channel IDs, command prefix, auto-purge, autocorrect and rule-required options, time zone, custom rules and command aliases, and which channels are locked.
 
@@ -18,7 +18,7 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 
 **Message cache** (72 hours): the text of recent messages, the author, and attachment details, excluding messages from bots. It exists so edit and delete logs still show what was said after a restart. Entries older than 72 hours are removed automatically.
 
-**User notifications** (off by default, per server): an admin can turn on `/userdms`. When on, okite sends a direct message to a member when a moderator bans, softbans, kicks, mutes, unmutes or warns them, when their mute ends, when a moderator cites one of their messages, or when an infraction against them is voided or deleted. It contains the server name, what happened, the reason and rule the moderator gave, the duration, the infraction number and, only if the server chose to, the moderator's name. A moderator can skip it for any one action with `--silent`. Okite does not keep a copy of the message and does not read replies. If the member's direct messages are closed, nothing is sent.
+**User notifications** (on by default, per server): an admin can turn them off with `/userdms enabled:false`. While they are on, okite sends a direct message to a member when a moderator bans, softbans, kicks, mutes, unmutes or warns them, when their mute ends, when a moderator cites one of their messages, or when an infraction against them is voided or deleted. It contains the server name, what happened, the reason and rule the moderator gave, the duration, the infraction number and, only if the server chose to, the moderator's name. A moderator can skip it for any one action with `--silent`. Okite does not keep a copy of the message and does not read replies. If the member's direct messages are closed, nothing is sent.
 
 **Pending ban prompts**: when a moderator bans a user, the IDs of that user's recent messages and the infraction number are kept until a moderator answers the save-or-delete prompt, or until it times out.
 

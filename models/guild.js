@@ -29,7 +29,7 @@ const guildSchema = new mongoose.Schema({
     messageLogs: { type: Boolean, default: false },
     banCleanup: { type: Boolean, default: true },
     banCleanupDays: { type: Number, default: 7 },
-    userDms: { type: Boolean, default: false },
+    userDms: { type: Boolean, default: true },
     userDmActions: { type: [String], default: ['ban', 'kick', 'mute', 'unmute', 'warn', 'cite', 'void'] },
     userDmShowMod: { type: Boolean, default: false },
     timezone: { type: String, default: null },
