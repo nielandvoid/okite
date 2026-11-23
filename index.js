@@ -3204,8 +3204,11 @@ async function handleInteraction(interaction) {
 
         if (commandName === 'ping') {
             const started = Date.now();
+            const slash = Boolean(interaction.token);
+            if (slash) console.log(`ping: interaction ${interaction.id} received ${started - interaction.createdTimestamp}ms after it was sent`);
             await interaction.reply({ content: 'pinging…', ephemeral: true });
             const apiMs = Date.now() - started;
+            if (slash) console.log(`ping: reply acknowledged in ${apiMs}ms`);
 
             const timed = async (fn) => {
                 const t = Date.now();
@@ -3230,7 +3233,10 @@ async function handleInteraction(interaction) {
                 ...(!supabaseMs && !mongoMs ? ['**database:** not configured'] : []),
                 `**uptime:** ${formatDuration(process.uptime() * 1000)}`
             ];
-            return interaction.editReply(lines.join('\n')).catch(err => console.error(`ping edit failed after ${Date.now() - started}ms:`, err?.message || err));
+            if (slash) console.log('ping: checks done, editing reply');
+            return interaction.editReply(lines.join('\n'))
+                .then(() => { if (slash) console.log(`ping: reply edited after ${Date.now() - started}ms`); })
+                .catch(err => console.error(`ping edit failed after ${Date.now() - started}ms:`, err?.message || err));
         }
 
         if (commandName === 'logchannels') {
@@ -4243,6 +4249,9 @@ async function handleInteraction(interaction) {
         await handleModerationAction(interaction, action, targetUserId, targetMessageId, reason, 'custom');
     }
 }
+
+client.rest.on('rateLimited', (info) => console.warn(`rate limited: ${info.method} ${info.route} for ${info.timeToReset}ms (global: ${info.global}, limit: ${info.limit})`));
+client.rest.on('invalidRequestWarning', (info) => console.warn(`invalid requests: ${info.count} in this window, resets in ${info.remainingTime}ms`));
 
 client.on(Events.InteractionCreate, (interaction) => {
     handleInteraction(interaction).catch(async (err) => {
