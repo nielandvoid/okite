@@ -4505,7 +4505,7 @@ function renderRuleList(serverRules, page = 0, { name: serverName = '', icon: se
     }
     if (current.length) pages.push(current);
     const at = Math.min(Math.max(page, 0), pages.length - 1);
-    const container = containerHeader(new ContainerBuilder().setAccentColor(COLORS.info), [`## ${serverName ? `${plainText(serverName)} Rules` : 'Rules'}`, `-# ${serverRules.length} ${serverRules.length === 1 ? 'rule' : 'rules'}`,
+    const container = containerHeader(new ContainerBuilder(), [`## ${serverName ? `${plainText(serverName)} Rules` : 'Rules'}`, `-# ${serverRules.length} ${serverRules.length === 1 ? 'rule' : 'rules'}`,
         `-# type \`${prefix}rule list\` or use \`/rule list\` to list rules.`, `-# add / remove rules with \`/rule add\`, \`${prefix}rule remove <id>\` or \`/rule remove\`.`].join('\n'), serverIcon || okiteIcon());
     container.addSeparatorComponents(divider());
     pages[at].forEach((u, i) => {
@@ -4530,7 +4530,7 @@ function renderHelp(prefix, wanted) {
 function renderHelpContainer(prefix, wanted) {
     const word = String(wanted || '').trim().toLowerCase().replace(/^[!?./]/, '');
     const name = COMMAND_HELP[word] ? word : COMMAND_WORDS[word];
-    const container = new ContainerBuilder().setAccentColor(COLORS.brand);
+    const container = new ContainerBuilder();
     const quote = (lines) => lines.map(l => `> ${l}`).join('\n');
     if (name && COMMAND_HELP[name]) {
         const h = COMMAND_HELP[name];
