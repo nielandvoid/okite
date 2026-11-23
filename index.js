@@ -541,6 +541,16 @@ const durationColumns = (d) => (d && !d.permanent ? { duration: d.label, expires
 
 const BAD_DURATION = 'that isn\'t a duration. use something like `30m`, `12h`, `7d`, `2w`, `1d12h`, or `permanent`.';
 
+function matchRule(all, input) {
+    const typed = String(input).toLowerCase();
+    const wanted = typed.replace(/^rule/, '').replace(/[\s.]+/g, '_').replace(/^(\d)/, 'r$1');
+    const exact = all.find(r => r.id.toLowerCase() === typed) || all.find(r => r.id.toLowerCase() === wanted);
+    if (exact) return { rule: exact };
+    const inSection = all.filter(r => r.id.toLowerCase().startsWith(`${wanted}_`));
+    if (inSection.length === 1) return { rule: inSection[0] };
+    return inSection.length ? { section: inSection } : {};
+}
+
 async function resolveRuleFields(guildId, ruleInput, reasonText) {
     const reason = reasonText || 'not specified';
     if (!ruleInput && (await getAutoPurge(guildId)).requireRule) {
@@ -548,7 +558,8 @@ async function resolveRuleFields(guildId, ruleInput, reasonText) {
     }
     if (!ruleInput || ruleInput.toLowerCase() === 'custom') return { ruleId: null, snapshot: reason, reasonColumn: null, reason };
     const all = await getServerRules(guildId);
-    const rule = all.find(r => r.id.toLowerCase() === ruleInput.toLowerCase());
+    const { rule, section } = matchRule(all, ruleInput);
+    if (section) return { error: `\`${ruleInput}\` is a section, not one rule. pick one: ${section.map(r => `\`${r.id}\``).join(', ')}` };
     if (!rule) return { error: `rule \`${ruleInput}\` not found. use \`custom\` or one of: ${all.map(r => `\`${r.id}\``).join(', ')}` };
     return { ruleId: rule.id, snapshot: rule.text, reasonColumn: reason, reason };
 }
@@ -614,7 +625,8 @@ const plainRuleText = (text) => String(text ?? '')
     .replace(/^\s*>>>\s?/, '')
     .split('\n').map(line => line.replace(/^\s*>\s?/, '')).join('\n')
     .trim();
-const listify = (text) => text.split('\n').map(line => line.replace(/^(\s*)(?:[\u2022\u2013\u2014\u2023\u25AA]\s*|[-*+]\s+)(\S.*)$/, '$1- $2')).join('\n');
+const listify = (text) => text.split('\n').map(line => line.replace(/^(\s*)(?:[\u2022\u2013\u2014\u2023\u25AA]\s*|[-*+]\s+)(\S.*)$/, '$1`-` $2')).join('\n');
+const dashBullets = (text) => String(text).replace(/^(\s*)(?:[\u2022\u2013\u2014\u2023\u25AA]\s*|[-*+]\s+)(?=\S)/gm, '$1`-` ');
 const quotedRuleText = (text, max = 500) => clip(listify(plainRuleText(text)), max).split('\n').map(l => (l ? `> ${l}` : '>')).join('\n');
 const stripRulePrefix = (label) => (label ? label.replace(/^rule\s*[\w.]+\s*:\s*/i, '').trim() : label);
 
@@ -4104,7 +4116,7 @@ async function handleModerationAction(interaction, action, targetUserId, targetM
             const caseTag = infraction ? ` (infraction #${infraction.case_number})` : '';
             const dm = await dmUser({ guild: interaction.guild, user: targetMessage.author, action: 'cite', reason, excerpt: targetMessage.content, infraction, moderator: interaction.user, modNote, silent });
 
-            const noticePromise = targetMessage.reply(`staff notice for <@${targetMessage.author.id}>${caseTag}:\n${reason}`);
+            const noticePromise = targetMessage.reply(`staff notice for <@${targetMessage.author.id}>${caseTag}:\n${dashBullets(reason)}`);
             noticePromise.catch(() => null);
             const logPromise = sendLog(interaction.guild, {
                 title: infraction ? `rule citation: infraction #${infraction.case_number}` : 'rule citation',
@@ -4473,7 +4485,7 @@ function renderRuleList(serverRules, page = 0, { name: serverName = '', icon: se
         u.subs.sort((x, y) => x.n - y.n);
         const heading = u.head
             ? `### Rule ${u.top} / ${plainText(stripRulePrefix(u.head.label) || u.head.label)} \`r${u.top}\``
-            : (u.subs.length > 1 ? `### Rule ${u.top}${u.group ? ` / ${plainText(u.group)}` : ''} \`r${u.top}\`` : null);
+            : (u.subs.length > 1 ? `### Rule ${u.top}${u.group ? ` / ${plainText(u.group)}` : ''}` : null);
         const headBody = u.head ? (ruleBody(u.head.text) || u.head.desc || '') : '';
         u.items = [
             ...(heading ? [heading] : []),
@@ -4805,7 +4817,7 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
     if (['ban', 'kick', 'softban', 'mute', 'unmute', 'unban'].includes(name)) {
         const { user, used } = await takeUser(0);
         const durationAllowed = name === 'ban' || name === 'mute';
-        if (!user) return fail(`syntax: \`${PREFIX}${name} <user>${durationAllowed ? ' [duration]' : ''}${name === 'ban' ? ' [--urgent]' : ''}${name === 'unmute' || name === 'unban' ? '' : ' [--rule <id>]'} [reason]\` (or reply to their message)`);
+        if (!user) return fail(`syntax: \`${PREFIX}${name} <user>${durationAllowed ? ' [duration]' : ''}${name === 'ban' ? ' [--urgent]' : ''}${name === 'unmute' || name === 'unban' ? '' : ' [--rule <id>]'}${name === 'unban' ? '' : ' [--silent]'} [reason]${name === 'unban' ? '' : ' [--mn <note>]'}\` (or reply to their message)`);
         values.user = user;
         let i = used;
         for (let n = 0; n < 4 && args[i]; n++) {
@@ -5012,7 +5024,7 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         subcommand = args[0]?.toLowerCase();
         if (['view', 'edit', 'void', 'restore', 'delete'].includes(subcommand)) {
             values.id = Number.parseInt(args[1], 10);
-            if (!Number.isInteger(values.id) || values.id < 1) return fail(`syntax: \`${PREFIX}infraction ${subcommand} <id>${subcommand === 'edit' || subcommand === 'void' ? ' <reason>' : ''}\`${subcommand === 'view' ? ` (for a user's history use \`${PREFIX}infraction user @user\`)` : ''}`);
+            if (!Number.isInteger(values.id) || values.id < 1) return fail(`syntax: \`${PREFIX}infraction ${subcommand} <id>${subcommand === 'edit' || subcommand === 'void' ? ' <reason>' : ''}${subcommand === 'void' || subcommand === 'delete' ? ' [--silent] [--mn <note>]' : ''}\`${subcommand === 'view' ? ` (for a user's history use \`${PREFIX}infraction user @user\`)` : ''}`);
             if (subcommand === 'edit' || subcommand === 'void') {
                 values.reason = restAfter(argText, 2);
                 if (!values.reason) return fail(`a reason is required: \`${PREFIX}infraction ${subcommand} ${values.id} <reason>\``);
@@ -5036,7 +5048,7 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
                 if (parseDuration(words.at(-1))) { values.duration = words.pop(); reasonText = words.join(' '); }
             }
             values.reason = reasonText || null;
-            if (!values.user) return fail(`syntax: \`${PREFIX}infraction add <user> [rule|custom] [duration] [reason]\` (no reason is recorded as "not specified", no duration as permanent)`);
+            if (!values.user) return fail(`syntax: \`${PREFIX}infraction add <user> [rule|custom] [duration] [--silent] [reason] [--mn <note>]\` (no reason is recorded as "not specified", no duration as permanent)`);
             const parent = used === 0 ? await getReplyMessage(message) : null;
             if (parent && parent.author.id === values.user.id) values.parentMessage = parent;
         } else if (subcommand !== 'recent') {
@@ -5239,15 +5251,16 @@ async function runPrefixMessage(message) {
             rest = argText ? argText.split(/\s+/) : [];
         }
         const first = rest[0];
-        if (!first) return reply(`syntax: \`${PREFIX}cite <rule id>\` or \`${PREFIX}cite custom <reason>\``);
+        if (!first) return reply(`syntax: \`${PREFIX}cite <rule id> [--silent] [--mn <note>]\` or \`${PREFIX}cite custom <reason> [--silent] [--mn <note>]\``);
 
         let text, ruleId;
         if (first.toLowerCase() === 'custom') {
             text = restAfter(argText, 1);
             ruleId = 'custom';
-            if (!text) return reply(`syntax: \`${PREFIX}cite custom <reason>\``);
+            if (!text) return reply(`syntax: \`${PREFIX}cite custom <reason> [--silent] [--mn <note>]\``);
         } else {
-            const rule = (await getServerRules(message.guildId)).find(r => r.id.toLowerCase() === first.toLowerCase());
+            const { rule, section } = matchRule(await getServerRules(message.guildId), first);
+            if (section) return reply(`\`${first}\` is a section, not one rule. pick one: ${section.map(r => `\`${r.id}\``).join(', ')}`);
             if (!rule) return reply(`rule \`${first}\` not found. try \`/rule list\`.`);
             text = rule.text;
             ruleId = rule.id;
