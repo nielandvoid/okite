@@ -1,6 +1,5 @@
 # Okite 掟
 ![visual](okite_banner.gif)
-server-wide moderation stack / toolkit for discord
 
 built with node and discord.js.
 
