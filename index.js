@@ -44,7 +44,17 @@ const FULL_INTENTS = [
 ];
 const LIMITED_INTENTS = FULL_INTENTS.filter(i => i !== GatewayIntentBits.GuildMembers && i !== GatewayIntentBits.MessageContent);
 const clientOptions = { presence: { status: 'idle' }, failIfNotExists: false, partials: [Partials.Message, Partials.Channel] };
-let client = new Client({ ...clientOptions, intents: FULL_INTENTS });
+function authInteractionRequests(c) {
+    const request = c.rest.request.bind(c.rest);
+    c.rest.request = (options) => {
+        const appId = c.application?.id ?? process.env.CLIENT_ID;
+        const route = String(options.fullRoute || '');
+        if (route.startsWith('/interactions/') || (appId && route.startsWith(`/webhooks/${appId}/`))) options = { ...options, auth: true };
+        return request(options);
+    };
+    return c;
+}
+let client = authInteractionRequests(new Client({ ...clientOptions, intents: FULL_INTENTS }));
 
 const mongoose = require('mongoose');
 const Guild = require('./models/guild');
@@ -6669,7 +6679,7 @@ async function login() {
         await client.login(process.env.DISCORD_TOKEN);
     } catch (err) {
         if (!/disallowed intents/i.test(err.message)) throw err;
-        const limited = new Client({ ...clientOptions, intents: LIMITED_INTENTS });
+        const limited = authInteractionRequests(new Client({ ...clientOptions, intents: LIMITED_INTENTS }));
         for (const event of client.eventNames()) for (const listener of client.listeners(event)) limited.on(event, listener);
         client = limited;
         console.warn('reduced mode: discord has not approved the Server Members and Message Content intents for this app, so prefix commands, message text in logs and join / leave logs are off. slash commands and context menus still work.');
