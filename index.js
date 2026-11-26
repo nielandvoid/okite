@@ -49,7 +49,7 @@ function authInteractionRequests(c) {
     c.rest.request = (options) => {
         const appId = c.application?.id ?? process.env.CLIENT_ID;
         const route = String(options.fullRoute || '');
-        if (route.startsWith('/interactions/') || (appId && route.startsWith(`/webhooks/${appId}/`))) options = { ...options, auth: true };
+        if (c.token && (route.startsWith('/interactions/') || (appId && route.startsWith(`/webhooks/${appId}/`)))) options = { ...options, auth: false, headers: { ...options.headers, Authorization: `Bot ${c.token}` } };
         return request(options);
     };
     return c;
