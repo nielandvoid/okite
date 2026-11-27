@@ -1,4 +1,4 @@
-const { REST, Routes, ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js"); require("dotenv").config(); const help = require("./help");
+const { REST, Routes, ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require("discord.js"); require("dotenv").config(); const help = require("./help");
 const { guildModmail, dmModmail } = require("./modmail-commands");
 
 const commands = [
@@ -406,6 +406,17 @@ const commands = [
                 .setDescription("the channel to unlock")
                 .setRequired(false)
         ),
+
+    new SlashCommandBuilder()
+        .setName("perms")
+        .setDescription(help.perms.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub => sub.setName("set").setDescription("allow or deny permissions for a role in a category or some of its channels")
+            .addChannelOption(o => o.setName("category").setDescription("the category").addChannelTypes(ChannelType.GuildCategory).setRequired(true))
+            .addRoleOption(o => o.setName("role").setDescription("the role").setRequired(true)))
+        .addSubcommand(sub => sub.setName("clear").setDescription("remove a role's permissions from a category and every channel in it")
+            .addChannelOption(o => o.setName("category").setDescription("the category").addChannelTypes(ChannelType.GuildCategory).setRequired(true))
+            .addRoleOption(o => o.setName("role").setDescription("the role").setRequired(true))),
 ];
 
 

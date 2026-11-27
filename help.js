@@ -38,13 +38,13 @@ module.exports = {
     modmail: {
         summary: 'remote tickets: members talk to the mods through okite\'s DMs',
         syntax: 'modmail\nmodmail setup #channel [server] [noping]\nmodmail off\nmodmail greeting <text|reset>\nmodmail closing <text|reset>\nmodmail block|unblock @user\nmodmail open @user <message>',
-        desc: 'a member DMs okite (or uses `/modmail open` there), picks the server, and a remote-ticket opens. their first message only brings up that prompt. after that, everything they send goes to a ticket thread in the modmail channel, where a card shows who they are, and their infractions.\nin the thread, the member\'s messages and your replies build up in one card per round. `reply` answers them (`sreply` sends it as the server), and plain messages stay between mods. the member sees nothing while they type. each reply sends them one card with what they wrote and your answer, and a second reply before they write again replaces that card.\nmembers end a ticket by typing `close` or with `/modmail close`, and pick which server they are talking to with `/modmail switch`. you end it with `close`. closing locks the thread and logs a transcript. alias: `mm`.',
+        desc: 'a member DMs okite (or uses `/modmail open` there), picks the server, and a remote-ticket opens. their first message only brings up that prompt. after that, everything they send goes to a ticket thread in the modmail channel, where a card shows who they are, and their infractions.\nin the thread, the member\'s messages and your replies build up in one card per round. `reply` answers them as the server (`modreply` signs it with your name), and plain messages stay between mods. the member sees nothing while they type. each reply sends them one card with what they wrote and your answer, and a second reply before they write again replaces that card.\nmembers end a ticket by typing `close` or with `/modmail close`, and pick which server they are talking to with `/modmail switch`. you end it with `close`. closing locks the thread and logs a transcript. alias: `mm`.',
         perm: 'Manage Messages (setup: Manage Channels)'
     },
     reply: {
         summary: 'answer a modmail ticket',
-        syntax: 'reply <message>\nsreply <message>',
-        desc: 'sends your message to the user of the modmail ticket you are in, with any files attached. `sreply` sends it as the server, with the server\'s name and icon instead of yours. aliases: `r`, `sr`.',
+        syntax: 'reply <message>\nmodreply <message>',
+        desc: 'sends your message to the user of the modmail ticket you are in, with any files attached, as the server with its name and icon. `modreply` sends it with your name and picture instead. aliases: `r`, `mr`.',
         perm: 'Manage Messages'
     },
     close: {
@@ -196,6 +196,12 @@ module.exports = {
         syntax: 'timezone\ntimezone <zone>\ntimezone reset',
         desc: 'sets the server time zone.\ntimes written into text, like the purge preview, are shown in it. discord timestamps follow each reader\'s own zone. <zone> is an offset like `UTC+5:30` or `-4`, or a name like `Asia/Kolkata`. `reset` goes back to the default. alias: `tz`.',
         perm: 'Manage Channels'
+    },
+    perms: {
+        summary: 'set or clear a role\'s permissions across a category',
+        syntax: '/perms set <category> <role>\n/perms clear <category> <role>',
+        desc: '`set` opens a card where you pick where (the whole category, the category only, or some of its channels) and which permissions to allow or deny. permissions you leave out stay as they are. `clear` removes the role\'s permissions from the category and every channel in it, after you confirm. slash only, since it needs menus.',
+        perm: 'Administrator'
     },
     rule: {
         summary: 'manage this server\'s rules',

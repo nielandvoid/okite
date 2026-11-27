@@ -19,7 +19,9 @@ const ticketSchema = new mongoose.Schema({
     activeAt: { type: Date, default: null },
     round: { type: mongoose.Schema.Types.Mixed, default: null },
     thread: { type: mongoose.Schema.Types.Mixed, default: null },
-    dmIds: { type: [String], default: [] }
+    dmIds: { type: [String], default: [] },
+    pending: { type: Boolean, default: false },
+    promptId: { type: String, default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Ticket', ticketSchema);

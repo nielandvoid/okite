@@ -274,7 +274,7 @@ const paintAdded = (text, before) => paintTokens(diffSides(before, text).b, ANSI
 const ISO_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
 const prettyTimes = (text) => String(text).replace(ISO_TIME, (iso) => `<t:${Math.floor(Date.parse(iso) / 1000)}:f>`);
 
-function renderLogEmbed({ title, color = COLORS.info, description, fields = [], kind = 'general', media = [] }) {
+function renderLogEmbed({ title, color = COLORS.info, description, fields = [], kind = 'general', media = [], icon }) {
     const valid = fields.filter(f => f && f.value !== undefined && f.value !== null && f.value !== '');
     const isShort = (f) => !f.code && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
     const quoted = valid.filter(isShort).map(f => `> **${sentenceCase(String(f.name))}:** ${prettyTimes(String(f.value).slice(0, 300))}${f.detail ? `\n${String(f.detail).slice(0, 900).split('\n').map(l => `> ${l}`).join('\n')}` : ''}`);
@@ -292,7 +292,7 @@ function renderLogEmbed({ title, color = COLORS.info, description, fields = [], 
 
     const person = valid.find(f => AVATAR_FIELDS.includes(String(f.name).toLowerCase()) && /<@!?(\d+)>/.test(String(f.value)));
     const id = person && String(person.value).match(/<@!?(\d+)>/)[1];
-    const avatar = id && client.users.cache.get(id)?.displayAvatarURL?.();
+    const avatar = icon || (id && client.users.cache.get(id)?.displayAvatarURL?.());
     if (avatar) embed.setThumbnail(avatar);
 
     const mod = valid.find(f => String(f.name).toLowerCase() === 'moderator' && /<@!?(\d+)>/.test(String(f.value)));
@@ -325,7 +325,7 @@ const MESSAGE_TEXT_BUDGET = 3800;
 const PLACEHOLDER_REASONS = new Set(['not specified', 'no reason given', 'banned (no reason given)']);
 
 // log layout: title, details, content, files, footer
-function renderLogContainer({ title, color = COLORS.info, description, fields = [], transcriptNames = [], media = [], attached = [], icon, plainTitle = false, banner }) {
+function renderLogContainer({ title, color = COLORS.info, description, fields = [], transcriptNames = [], media = [], attached = [], icon, plainTitle = false, banner, spoiler = true }) {
     const valid = fields.filter(f => f && f.value !== undefined && f.value !== null && f.value !== '');
     const isMain = (f) => !f.plain && (f.code || (String(f.name).toLowerCase() === 'reason' && !PLACEHOLDER_REASONS.has(String(f.value).toLowerCase())));
     const isShort = (f) => !isMain(f) && !f.section && (f.inline || (String(f.value).length <= 70 && !String(f.value).includes('\n')));
@@ -361,7 +361,7 @@ function renderLogContainer({ title, color = COLORS.info, description, fields = 
     const container = containerHeader(base, headText, avatar);
     for (const part of parts) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(render(part)));
     if (media.length || attached.length) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock('**Preview**'));
-    if (media.length) container.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(...media.slice(0, 10).map(m => { const item = new MediaGalleryItemBuilder().setURL(String(m.url ?? m)).setSpoiler(true); const alt = String(m.description || '').slice(0, 1000); return alt ? item.setDescription(alt) : item; })));
+    if (media.length) container.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(...media.slice(0, 10).map(m => { const item = new MediaGalleryItemBuilder().setURL(String(m.url ?? m)).setSpoiler(spoiler); const alt = String(m.description || '').slice(0, 1000); return alt ? item.setDescription(alt) : item; })));
     const cards = [...attached, ...transcriptNames];
     if (cards.length) {
         if (!(media.length || attached.length)) container.addSeparatorComponents(divider());
@@ -416,6 +416,14 @@ async function sendLog(guild, entry) {
     ] : [];
     shown.transcriptNames = transcript.map(t => t.name);
     const uploaded = uploads.map(u => new AttachmentBuilder(u.buffer, { name: u.name }));
+    const person = fields.find(f => f && AVATAR_FIELDS.includes(String(f.name).toLowerCase()) && /<@!?(\d+)>/.test(String(f.value)));
+    const personId = person && String(person.value).match(/<@!?(\d+)>/)[1];
+    const avatarUrl = entry.icon || (personId && client.users.cache.get(personId)?.displayAvatarURL?.({ size: 256 }));
+    const avatar = avatarUrl && !String(avatarUrl).startsWith('attachment://') ? await keepPicture(avatarUrl, 'avatar') : null;
+    if (avatar) {
+        shown.icon = `attachment://${avatar.name}`;
+        uploaded.push(new AttachmentBuilder(avatar.buffer, { name: avatar.name }));
+    }
     const files = [...uploaded, ...transcript];
     const useContainer = USE_CONTAINERS && entry.embed !== true;
     const pingRole = entry.pingRole || null;
@@ -446,6 +454,43 @@ const fetchAttachment = (url, options = {}) => {
     if (!/^(cdn\.discordapp\.com|media\.discordapp\.net)$/.test(host)) throw new Error('attachment is not on discord\'s cdn');
     return fetch(url, options);
 };
+
+async function keepPicture(url, name) {
+    try {
+        const res = await fetchAttachment(String(url), { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const buffer = Buffer.from(await res.arrayBuffer());
+        if (buffer.length > 8 * 1024 * 1024) return null;
+        const ext = (new URL(String(url)).pathname.match(/\.(png|jpe?g|gif|webp)$/i)?.[1] || 'png').toLowerCase();
+        return { name: `${name}.${ext}`, buffer, image: true, alt: name };
+    } catch (err) {
+        console.error('picture keep error:', err.message);
+        return null;
+    }
+}
+
+const CDN_FILE_LINK = /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/attachments\/\d+\/\d+\/[^\s<>()[\]]+/gi;
+async function keepLinkedFiles(text, budget) {
+    const links = [...new Set(String(text || '').match(CDN_FILE_LINK) || [])].slice(0, 5);
+    if (!links.length) return [];
+    const fresh = await client.rest.post('/attachments/refresh-urls', { body: { attachment_urls: links } }).then(r => r?.refreshed_urls || []).catch(() => []);
+    const out = [];
+    let used = 0;
+    for (const [i, link] of links.entries()) {
+        try {
+            const res = await fetchAttachment(fresh.find(f => f.original === link)?.refreshed || link, { signal: AbortSignal.timeout(15000) });
+            if (!res.ok) throw new Error(`status ${res.status}`);
+            const buffer = Buffer.from(await res.arrayBuffer());
+            if (used + buffer.length > budget) continue;
+            used += buffer.length;
+            const name = `link${i + 1}-${safeName(decodeURIComponent(new URL(link).pathname.split('/').pop()))}`;
+            out.push({ name, buffer, image: /\.(png|jpe?g|gif|webp)$/i.test(name), alt: name });
+        } catch (err) {
+            console.error('linked file keep error:', err.message);
+        }
+    }
+    return out;
+}
 
 const who = (user) => user ? `<@${user.id}> (\`${user.tag ?? user.username}\` / ${user.id})` : 'unknown';
 const clip = (text, n = 1000) => (text && text.length > n) ? text.slice(0, n - 1) + '…' : (text || '');
@@ -2848,7 +2893,8 @@ async function handleInteraction(interaction) {
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
     if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appeal|appealnext|appealmodal):/.test(interaction.customId)) return handleAppealStart(interaction);
     if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appealdecide|appealdeny):/.test(interaction.customId)) return handleAppealDecision(interaction);
-    if ((interaction.isButton?.() || interaction.isModalSubmit?.() || interaction.isStringSelectMenu?.()) && /^(mmopen|mmopenpick|mmcancel|mmcloseask|mmcloseyes|mmswitch|mmreply|mmreplymodal|mmclaim|mmclose|mmclosemodal)(:|$)/.test(interaction.customId)) return handleModmailComponent(interaction);
+    if ((interaction.isButton?.() || interaction.isStringSelectMenu?.()) && /^(pmwhere|pmallow|pmdeny|pmapply|pmclear|pmcancel)(:|$)/.test(interaction.customId)) return handlePermsComponent(interaction);
+    if ((interaction.isButton?.() || interaction.isModalSubmit?.() || interaction.isStringSelectMenu?.()) && /^(mmopen|mmopenpick|mmcancel|mmcloseask|mmcloseyes|mmswitch|mmview|mmignore|mmreply|mmreplymodal|mmclaim|mmclose|mmclosemodal)(:|$)/.test(interaction.customId)) return handleModmailComponent(interaction);
     if (interaction.isChatInputCommand?.() && !interaction.guild && interaction.commandName === 'modmail') return runDmModmail(interaction);
 
     if (!interaction.guild) {
@@ -4627,7 +4673,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
-    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', modmail: 'modmail', mm: 'modmail', reply: 'reply', r: 'reply', sreply: 'sreply', sr: 'sreply', areply: 'sreply', ar: 'sreply', close: 'close', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', perms: 'perms', modmail: 'modmail', mm: 'modmail', reply: 'reply', r: 'reply', sreply: 'sreply', sr: 'sreply', areply: 'sreply', ar: 'sreply', modreply: 'modreply', mr: 'modreply', close: 'close', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
@@ -4640,6 +4686,30 @@ const ON_OFF = { on: 'on', enable: 'on', true: 'on', yes: 'on', off: 'off', disa
 const AUTOPURGE_TARGETS = { commands: 'commands', command: 'commands', parent: 'parent', parents: 'parent', result: 'result', results: 'result', prompt: 'result' };
 const LOG_WORDS = { general: 'general', citation: 'citation', citations: 'citation', purge: 'purge', purges: 'purge', moderation: 'moderation', messages: 'messages', members: 'members', voice: 'voice', server: 'server' };
 
+const MANAGER_COMMANDS = ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode', 'joingate', 'lockdown'];
+const COMMAND_PERMS = {
+    ban: ['BanMembers', 'Ban Members'],
+    softban: ['BanMembers', 'Ban Members'],
+    unban: ['BanMembers', 'Ban Members'],
+    kick: ['KickMembers', 'Kick Members'],
+    mute: ['ModerateMembers', 'Timeout Members'],
+    unmute: ['ModerateMembers', 'Timeout Members'],
+    setnick: ['ManageNicknames', 'Manage Nicknames'],
+    role: ['ManageRoles', 'Manage Roles'],
+    voice: ['MoveMembers', 'Move Members'],
+    'security-audit': ['ManageGuild', 'Manage Server'],
+    perms: ['Administrator', 'Administrator'],
+    ping: null,
+    serverinfo: null,
+    roles: null,
+    ...Object.fromEntries(MANAGER_COMMANDS.map(c => [c, ['ManageChannels', 'Manage Channels']]))
+};
+const missingCommandPerm = (perms, command) => {
+    if (COMMAND_PERMS[command] === null) return null;
+    const [flag, label] = COMMAND_PERMS[command] ?? ['ManageMessages', 'Manage Messages'];
+    return perms.has(PermissionFlagsBits.Administrator) || perms.has(PermissionFlagsBits[flag]) ? null : label;
+};
+
 const defaultPrefix = () => config.prefix || process.env.PREFIX || '!';
 const prefixCache = new Map();
 
@@ -4647,7 +4717,7 @@ const HELP_GROUPS = [
     ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
     ['members', ['modmail', 'reply', 'close']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule']],
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule', 'perms']],
     ['utility', ['ping', 'help', 'security-audit']]
 ];
 const COMMAND_HELP = require('./help');
@@ -5138,12 +5208,13 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         return { commandName: 'bancleanup', subcommand, values };
     }
 
-    if (name === 'reply' || name === 'sreply') {
+    if (name === 'reply' || name === 'sreply' || name === 'modreply') {
         const text = argText.trim();
         [...message.attachments.values()].slice(0, RELAY_FILE_SLOTS.length).forEach((a, i) => { values[RELAY_FILE_SLOTS[i]] = a; });
-        if (!text && !message.attachments.size) return fail(`syntax: \`${PREFIX}${name} <message>\` inside a modmail ticket thread${name === 'reply' ? ` (\`${PREFIX}sreply\` sends it as the server)` : ''}`);
+        if (!text && !message.attachments.size) return fail(`syntax: \`${PREFIX}${name} <message>\` inside a modmail ticket thread${name === 'reply' ? ` (\`${PREFIX}modreply\` sends it with your name)` : ''}`);
         values.message = text;
         if (name === 'sreply') values.as_server = true;
+        if (name === 'modreply') values.as_server = false;
         return { commandName: 'modmail', subcommand: 'reply', values };
     }
 
@@ -5192,6 +5263,8 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         }
         return fail(syntax);
     }
+
+    if (name === 'perms') return { commandName: 'perms', subcommand, values };
 
     if (name === 'modrole') {
         const first = args[0]?.toLowerCase();
@@ -5434,6 +5507,7 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'appeals') return subcommand === 'list';
     if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
+    if (commandName === 'perms') return true;
     if (commandName === 'modmail') return ['settings', 'reply'].includes(subcommand);
     return false;
 }
@@ -5590,6 +5664,8 @@ async function runPrefixMessage(message) {
     }
     if (!command) return;
     if (command === 'history') { command = 'infraction'; argText = `user ${argText}`.trim(); }
+    const lacking = missingCommandPerm(perms, command);
+    if (lacking) return reply(`you need **${lacking}** to use \`${PREFIX}${command}\`.`);
     message.__corrections = corrections;
     const noteFor = (fixes) => `*corrected ${fixes.map(([from, to]) => `\`${from}\` → \`${to}\``).join(', ')}*`;
     if (corrections.length) message.__correctionNote = noteFor(corrections);
@@ -6006,6 +6082,7 @@ client.on(Events.MessageDelete, safe(async (message) => {
     const files = message.attachments ? Array.from(message.attachments.values()).map(describeAttachmentLink).join('\n') : (stored?.attachments || []).map(a => describeFile(a.name, a.type, a.size)).join('\n');
 
     const pictures = await downloadAttachments(message.attachments);
+    pictures.uploads.push(...await keepLinkedFiles(content, MAX_UPLOAD_BYTES - pictures.uploads.reduce((n, u) => n + u.buffer.length, 0)));
 
     const deleter = author ? await findMessageDeleter(message.guild, author.id, message.channelId) : { kind: 'no-author' };
     const deletedBy = deleter.kind === 'mod' ? who(deleter.executor)
@@ -6151,7 +6228,7 @@ async function getExtras(guildId) {
         honeypot: { channelId: src.honeypotChannelId || null, action: src.honeypotAction || 'softban', invite: !!src.honeypotInvite },
         appeals: { enabled: !!src.appealsEnabled, channelId: src.appealsChannelId || null, questions: custom ? src.appealQuestions.map(q => ({ label: q.label, hint: q.hint || '' })) : [], custom, blocked: Array.isArray(src.appealBlocked) ? src.appealBlocked : [] },
         modRoleId: src.modRoleId || null,
-        modmail: { enabled: !!src.modmailEnabled, channelId: src.modmailChannelId || null, asServer: !!src.modmailAsServer, ping: src.modmailPing !== false, greeting: src.modmailGreeting || null, closeMessage: src.modmailCloseMessage || null, blocked: Array.isArray(src.modmailBlocked) ? src.modmailBlocked : [] }
+        modmail: { enabled: !!src.modmailEnabled, channelId: src.modmailChannelId || null, asServer: src.modmailAsServer !== false, ping: src.modmailPing !== false, greeting: src.modmailGreeting || null, closeMessage: src.modmailCloseMessage || null, blocked: Array.isArray(src.modmailBlocked) ? src.modmailBlocked : [] }
     };
     extrasCache.set(guildId, extras);
     return extras;
@@ -6777,8 +6854,8 @@ function renderTicketHeader({ ticket, user, member, record }) {
     const components = [container];
     if (ticket.status !== 'closed') {
         components.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:0`).setLabel('Reply').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:1`).setLabel('Reply as server').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:1`).setLabel('Reply').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:0`).setLabel('Reply as mod').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`mmclaim:${ticket._id}`).setLabel(ticket.claimedBy ? 'Unclaim' : 'Claim').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`mmclose:${ticket._id}`).setLabel('Close').setStyle(ButtonStyle.Danger)
         ));
@@ -6839,13 +6916,14 @@ async function openTicket(guild, user, openedBy) {
             thread = await channel.threads.create({ name, message: header });
             headerMessage = await thread.fetchStarterMessage().catch(() => null);
         } else {
-            headerMessage = await channel.send(header);
-            thread = await headerMessage.startThread({ name, autoArchiveDuration: 10080 });
+            thread = await channel.threads.create({ name, autoArchiveDuration: 10080, type: ChannelType.PublicThread });
+            headerMessage = await thread.send(header);
         }
     } catch (err) {
         console.error('modmail open error:', err.message);
         await ticketStore.remove(ticket._id);
-        if (headerMessage) await headerMessage.delete().catch(() => null);
+        if (thread) await thread.delete().catch(() => null);
+        else if (headerMessage) await headerMessage.delete().catch(() => null);
         return { error: 'okite could not create the ticket thread (it needs View Channel, Send Messages and Create Public Threads in the modmail channel)' };
     }
     const patch = { channelId: headerMessage?.channelId ?? thread.id, headerId: headerMessage?.id ?? null, threadId: thread.id };
@@ -6867,7 +6945,7 @@ async function openTicket(guild, user, openedBy) {
 }
 
 const CARD_TEXT_LIMIT = 3600;
-const CARD_SECTION_LIMIT = 10;
+const CARD_SECTION_LIMIT = 8;
 const ticketLocks = new Map();
 function withTicketLock(id, fn) {
     const key = String(id);
@@ -6902,7 +6980,8 @@ async function renderCard(parts, footer = null) {
     for (const [i, section] of cardSections(parts).entries()) {
         if (i) container.addSeparatorComponents(divider());
         const text = section.items.map(p => p.text).filter(Boolean).join('\n');
-        container.addTextDisplayComponents(textBlock(clip(`-# ${section.head}${text ? `\n${text}` : ''}`, 3900)));
+        container.addTextDisplayComponents(textBlock(`-# ${section.head}`));
+        if (text) container.addTextDisplayComponents(textBlock(clip(text, 3900)));
         const files = section.items.flatMap(p => p.files || []);
         if (!files.length) continue;
         const got = await downloadAttachments(new Map(files.map((f, k) => [String(k), { url: f.url, name: f.name, size: f.size, contentType: f.image ? 'image/png' : 'application/octet-stream' }])), MODMAIL_UPLOAD_BYTES);
@@ -6991,10 +7070,20 @@ async function modWrites({ ticket, guild, mod, text, attachments, asServer, foot
         }
         round.mod.push(dmPart);
         if (footer) round.footer = footer;
-        const sent = await user.send(await renderCard([...round.user, ...round.mod], round.footer)).catch(() => null);
-        if (!sent) return { error: 'could not DM them. their DMs are closed or they blocked okite.' };
-        if (replacing) await sent.channel.messages.delete(replacing).catch(() => null);
-        round.dmId = sent.id;
+        let sent = null;
+        let promptId = current.promptId ?? null;
+        if (current.pending) {
+            if (!promptId) {
+                const notice = await user.send(modmailNotice(current, guild)).catch(() => null);
+                if (!notice) return { error: 'could not DM them. their DMs are closed or they blocked okite.' };
+                promptId = notice.id;
+            }
+        } else {
+            sent = await user.send(await renderCard([...round.user, ...round.mod], round.footer)).catch(() => null);
+            if (!sent) return { error: 'could not DM them. their DMs are closed or they blocked okite.' };
+            if (replacing) await sent.channel.messages.delete(replacing).catch(() => null);
+            round.dmId = sent.id;
+        }
 
         const thread = await ticketThread(current);
         let threadState = current.thread;
@@ -7006,10 +7095,36 @@ async function modWrites({ ticket, guild, mod, text, attachments, asServer, foot
                 if (files.length && kept.length) dmPart.files = kept.map(a => ({ url: a.url, name: a.name.replace(/^s\d+-\d+-/, ''), size: a.size, image: !!a.contentType?.startsWith('image/') }));
             }
         }
-        const dmIds = [...(current.dmIds || []).filter(id => id !== replacing), sent.id].slice(-100);
-        await ticketStore.update(current._id, { round, thread: threadState, dmIds, lastActivity: new Date(), modMessages: (current.modMessages || 0) + 1 });
-        return { ok: true, user };
+        const dmIds = sent ? [...(current.dmIds || []).filter(id => id !== replacing), sent.id].slice(-100) : current.dmIds || [];
+        await ticketStore.update(current._id, { round, thread: threadState, dmIds, promptId, lastActivity: new Date(), modMessages: (current.modMessages || 0) + 1 });
+        return { ok: true, user, pending: !!current.pending };
     });
+}
+
+function modmailNotice(ticket, guild) {
+    return cardPayload(`you received a modmail from ${plainText(guild.name)}.`, [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`mmview:${ticket._id}`).setLabel('View').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`mmignore:${ticket._id}`).setLabel('Ignore').setStyle(ButtonStyle.Secondary)
+    )], 'ignoring it closes the ticket.');
+}
+
+async function viewModmail(interaction, ticketId) {
+    await interaction.deferUpdate();
+    const result = await withTicketLock(ticketId, async () => {
+        const current = await ticketStore.get(ticketId);
+        if (!current || current.userId !== interaction.user.id || current.status !== 'open') return 'closed';
+        if (!current.pending) return 'seen';
+        const round = current.round ?? emptyRound();
+        const sent = await interaction.user.send(await renderCard([...round.user, ...round.mod], round.footer)).catch(() => null);
+        if (!sent) return 'failed';
+        round.dmId = sent.id;
+        await ticketStore.update(current._id, { pending: false, promptId: null, round, activeAt: new Date(), dmIds: [...(current.dmIds || []), sent.id].slice(-100) });
+        const thread = await ticketThread(current);
+        if (thread) await thread.send(cardPayload(`-# ${await withPicture(userEmoji(interaction.user), userName(interaction.user))} opened the modmail`)).catch(() => null);
+        return 'shown';
+    });
+    if (result === 'shown' || result === 'seen') return interaction.message?.delete?.().catch(() => null);
+    return interaction.editReply(cardPayload(result === 'closed' ? 'that ticket is already closed.' : 'okite could not show it. try again.', result === 'closed' ? [] : interaction.message.components));
 }
 
 async function ticketTranscript(thread, ticket, user, guild) {
@@ -7144,8 +7259,14 @@ async function handleModmailDm(message) {
     if (open.length && /^\/?close$/.test(typed)) return message.reply(closePrompt(open)).catch(() => null);
     if (open.length) {
         const ref = message.reference?.messageId;
-        const target = (ref && open.find(t => (t.dmIds || []).includes(ref))) || open[0];
-        return userWrites(target, message);
+        const target = (ref && open.find(t => !t.pending && (t.dmIds || []).includes(ref))) || open.find(t => !t.pending);
+        if (target) return userWrites(target, message);
+        const waiting = open[0];
+        const guild = client.guilds.cache.get(waiting.guildId);
+        const notice = guild && await message.reply(modmailNotice(waiting, guild)).catch(() => null);
+        if (!notice) return null;
+        if (waiting.promptId) await message.channel.messages.delete(waiting.promptId).catch(() => null);
+        return ticketStore.update(waiting._id, { promptId: notice.id });
     }
     if (Date.now() - (modmailPrompted.get(userId) ?? 0) < 2 * 60e3) return null;
     const prompt = await openPrompt(message.author);
@@ -7191,17 +7312,18 @@ async function runDmModmail(interaction) {
 }
 
 function modmailReplyModal(ticketId, asServer) {
-    return new ModalBuilder().setCustomId(`mmreplymodal:${ticketId}:${asServer ? 1 : 0}`).setTitle(asServer ? 'Reply as server' : 'Reply')
+    return new ModalBuilder().setCustomId(`mmreplymodal:${ticketId}:${asServer ? 1 : 0}`).setTitle(asServer ? 'Reply' : 'Reply as mod')
         .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('text').setLabel('Message').setStyle(TextInputStyle.Paragraph).setMaxLength(1900).setRequired(true)));
 }
 
 async function handleModmailComponent(interaction) {
     const [step, a, b] = interaction.customId.split(':');
 
-    if (['mmopen', 'mmopenpick', 'mmcancel', 'mmcloseask', 'mmcloseyes', 'mmswitch'].includes(step)) {
+    if (['mmopen', 'mmopenpick', 'mmcancel', 'mmcloseask', 'mmcloseyes', 'mmswitch', 'mmview', 'mmignore'].includes(step)) {
         if (step === 'mmcancel') return interaction.update(cardPayload('okay, nothing changed.'));
+        if (step === 'mmview') return viewModmail(interaction, a);
         if (step === 'mmopen' || step === 'mmopenpick') return startMemberTicket(interaction, step === 'mmopen' ? a : interaction.values[0]);
-        const ticket = await ticketStore.get(step === 'mmcloseyes' ? a : interaction.values[0]);
+        const ticket = await ticketStore.get(['mmcloseyes', 'mmignore'].includes(step) ? a : interaction.values[0]);
         if (!ticket || ticket.userId !== interaction.user.id || ticket.status !== 'open') return interaction.update(cardPayload('that ticket is already closed.'));
         const name = plainText(guildLabel(ticket.guildId));
         if (step === 'mmcloseask') return interaction.update(closePrompt([ticket]));
@@ -7211,7 +7333,8 @@ async function handleModmailComponent(interaction) {
         }
         const guild = client.guilds.cache.get(ticket.guildId);
         await interaction.update(cardPayload('closing…'));
-        if (guild) await closeTicket({ ticket, guild, by: interaction.user, reason: null, silent: true, byMember: true });
+        if (guild) await closeTicket({ ticket, guild, by: interaction.user, reason: step === 'mmignore' ? 'ignored the modmail' : null, silent: true, byMember: true });
+        if (step === 'mmignore') return interaction.editReply(cardPayload(`ignored. the modmail from ${name} is closed.`));
         const left = await openTickets(interaction.user.id);
         return interaction.editReply(cardPayload(`you closed your ticket with ${name}.`, [], left.length ? `you're now talking to ${plainText(guildLabel(left[0].guildId))}.` : 'text okite again anytime to open a new one.'));
     }
@@ -7345,6 +7468,7 @@ async function runModmailCommand(interaction, { isMod, isManager }) {
         const current = await ticketStore.findOne({ guildId: guild.id, userId: user.id, status: 'open' });
         const opened = current ? { ticket: current, thread: await ticketThread(current) } : await openTicket(guild, user, interaction.user.id);
         if (opened.error) return done(`could not open the ticket: ${opened.error}.`);
+        if (!current) await ticketStore.update(opened.ticket._id, { pending: true });
         const result = await modWrites({ ticket: opened.ticket, guild, mod: interaction.user, text, attachments: files, asServer, footer: current ? null : 'reply here to answer. okite routes it to the mods.' });
         if (result.error && !current) {
             await ticketStore.remove(opened.ticket._id);
@@ -7356,7 +7480,7 @@ async function runModmailCommand(interaction, { isMod, isManager }) {
         }
         if (result.error) return done(result.error);
         if (!current) await ticketStore.update(opened.ticket._id, { activeAt: new Date() });
-        return done(`sent. the ticket is <#${opened.thread?.id ?? opened.ticket.threadId}>.`);
+        return done(`sent${result.pending ? '. they got a prompt to view it' : ''}. the ticket is <#${opened.thread?.id ?? opened.ticket.threadId}>.`);
     }
 
     const ticket = await ticketFromThread(interaction.channelId);
@@ -7379,12 +7503,175 @@ async function runModmailCommand(interaction, { isMod, isManager }) {
     return null;
 }
 
+const PERM_CHOICES = [
+    ['ViewChannel', 'View Channel'], ['SendMessages', 'Send Messages'], ['SendMessagesInThreads', 'Send Messages in Threads'],
+    ['CreatePublicThreads', 'Create Public Threads'], ['CreatePrivateThreads', 'Create Private Threads'], ['EmbedLinks', 'Embed Links'],
+    ['AttachFiles', 'Attach Files'], ['AddReactions', 'Add Reactions'], ['UseExternalEmojis', 'Use External Emojis'],
+    ['MentionEveryone', 'Mention @everyone'], ['ManageMessages', 'Manage Messages'], ['ManageThreads', 'Manage Threads'],
+    ['ReadMessageHistory', 'Read Message History'], ['SendVoiceMessages', 'Send Voice Messages'], ['SendPolls', 'Create Polls'],
+    ['UseApplicationCommands', 'Use Application Commands'], ['Connect', 'Connect'], ['Speak', 'Speak'], ['Stream', 'Video'],
+    ['UseVAD', 'Use Voice Activity'], ['MuteMembers', 'Mute Members'], ['DeafenMembers', 'Deafen Members'], ['MoveMembers', 'Move Members'],
+    ['ManageChannels', 'Manage Channel'], ['ManageRoles', 'Manage Permissions']
+];
+const PERM_LABELS = Object.fromEntries(PERM_CHOICES);
+const categoryChildren = (category) => [...category.guild.channels.cache.filter(c => c.parentId === category.id).values()].sort((x, y) => x.rawPosition - y.rawPosition);
+
+function permsSetCard(role, category, picks) {
+    const children = categoryChildren(category);
+    const where = new StringSelectMenuBuilder().setCustomId(`pmwhere:${role.id}:${category.id}`).setPlaceholder('where').setMinValues(1)
+        .addOptions(
+            { label: 'the category and every channel in it', value: 'all', default: picks.where.includes('all') },
+            { label: 'the category only', value: 'cat', default: picks.where.includes('cat') },
+            ...children.slice(0, 23).map(c => ({ label: clip(`#${c.name}`, 100), value: c.id, default: picks.where.includes(c.id) }))
+        );
+    where.setMaxValues(where.options.length);
+    const perms = (kind) => new StringSelectMenuBuilder().setCustomId(`pm${kind}:${role.id}:${category.id}`).setPlaceholder(kind === 'allow' ? 'allow' : 'deny')
+        .setMinValues(0).setMaxValues(PERM_CHOICES.length)
+        .addOptions(PERM_CHOICES.map(([value, label]) => ({ label, value, default: picks[kind].includes(value) })));
+    const text = [
+        `set permissions for <@&${role.id}>`,
+        `> category: <#${category.id}> (${children.length} channel${children.length === 1 ? '' : 's'})`,
+        `\`-\` allow: ${picks.allow.map(p => PERM_LABELS[p]).join(', ') || 'nothing'}`,
+        `\`-\` deny: ${picks.deny.map(p => PERM_LABELS[p]).join(', ') || 'nothing'}`
+    ].join('\n');
+    return cardPayload(text, [
+        new ActionRowBuilder().addComponents(where),
+        new ActionRowBuilder().addComponents(perms('allow')),
+        new ActionRowBuilder().addComponents(perms('deny')),
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`pmapply:${role.id}:${category.id}`).setLabel('Apply').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('pmcancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+        )
+    ], `permissions you leave in neither list stay as they are.${children.length > 23 ? ' only the first 23 channels can be picked one by one.' : ''}`);
+}
+
+const permsPicks = (message) => {
+    const out = { where: [], allow: [], deny: [] };
+    const walk = (list) => {
+        for (const c of list ?? []) {
+            const field = { pmwhere: 'where', pmallow: 'allow', pmdeny: 'deny' }[String(c.customId ?? c.data?.custom_id ?? '').split(':')[0]];
+            if (field) out[field] = (c.options ?? []).filter(o => o.default).map(o => o.value);
+            walk(c.components);
+        }
+    };
+    walk(message?.components);
+    return out;
+};
+
+async function permsTargets(guild, roleId, categoryId) {
+    const role = guild.roles.cache.get(roleId) ?? await guild.roles.fetch(roleId).catch(() => null);
+    const category = guild.channels.cache.get(categoryId);
+    return { role, category: category?.type === ChannelType.GuildCategory ? category : null };
+}
+
+async function runPermsCommand(interaction) {
+    const { guild, options } = interaction;
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'you need **Administrator** to use this command.', ephemeral: true });
+    if (interaction.sourceMessage) return interaction.reply('`/perms` needs menus, so it only works as a slash command.');
+    const me = guild.members.me;
+    if (!me.permissions.has(PermissionFlagsBits.ManageRoles) || !me.permissions.has(PermissionFlagsBits.ManageChannels)) return interaction.reply({ content: 'okite needs **Manage Roles** and **Manage Channels** for this.', ephemeral: true });
+    const role = options.getRole?.('role');
+    const category = options.getChannel('category');
+    if (!role || category?.type !== ChannelType.GuildCategory) return interaction.reply({ content: 'pick a role and a category.', ephemeral: true });
+    if (options.getSubcommand() === 'set') return interaction.reply({ ...permsSetCard(role, category, { where: ['all'], allow: [], deny: [] }), flags: V2_FLAG | MessageFlags.Ephemeral });
+    const targets = [category, ...categoryChildren(category)];
+    const holding = targets.filter(c => c.permissionOverwrites?.cache?.has(role.id)).length;
+    if (!holding) return interaction.reply({ content: `<@&${role.id}> has no permissions set in <#${category.id}> or its channels.`, ephemeral: true, allowedMentions: { parse: [] } });
+    return interaction.reply({
+        ...cardPayload(`remove <@&${role.id}>'s permissions from <#${category.id}> and every channel in it?\n> ${holding} of ${targets.length} have permissions set for it.`, [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`pmclear:${role.id}:${category.id}`).setLabel('Remove').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('pmcancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+        )], 'the channels fall back to the category and server settings for this role.'),
+        flags: V2_FLAG | MessageFlags.Ephemeral
+    });
+}
+
+async function handlePermsComponent(interaction) {
+    const [step, roleId, categoryId] = interaction.customId.split(':');
+    if (step === 'pmcancel') return interaction.update(cardPayload('okay, nothing changed.'));
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'you need **Administrator** to do this.', ephemeral: true });
+    const { role, category } = await permsTargets(interaction.guild, roleId, categoryId);
+    if (!role || !category) return interaction.update(cardPayload('that role or category no longer exists.'));
+    const reason = clip(`/perms by ${interaction.user.username} (${interaction.user.id})`, 500);
+
+    if (step === 'pmwhere' || step === 'pmallow' || step === 'pmdeny') {
+        const picks = permsPicks(interaction.message);
+        picks[{ pmwhere: 'where', pmallow: 'allow', pmdeny: 'deny' }[step]] = interaction.values;
+        if (step === 'pmwhere' && interaction.values.includes('all')) picks.where = ['all'];
+        return interaction.update(permsSetCard(role, category, picks));
+    }
+
+    if (step === 'pmapply') {
+        const picks = permsPicks(interaction.message);
+        const both = picks.allow.filter(p => picks.deny.includes(p));
+        if (both.length) return interaction.reply({ content: `${both.map(p => PERM_LABELS[p]).join(', ')} can't be allowed and denied at once.`, ephemeral: true });
+        if (!picks.allow.length && !picks.deny.length) return interaction.reply({ content: 'pick at least one permission to allow or deny.', ephemeral: true });
+        if (!picks.where.length) return interaction.reply({ content: 'pick where to apply it.', ephemeral: true });
+        const children = categoryChildren(category);
+        const targets = picks.where.includes('all') ? [category, ...children]
+            : picks.where.map(id => (id === 'cat' ? category : children.find(c => c.id === id))).filter(Boolean);
+        await interaction.update(cardPayload(`applying to ${targets.length} channel${targets.length === 1 ? '' : 's'}…`));
+        const change = Object.fromEntries([...picks.allow.map(p => [p, true]), ...picks.deny.map(p => [p, false])]);
+        let done = 0;
+        const failed = [];
+        for (const channel of targets) {
+            const ok = await channel.permissionOverwrites.edit(role.id, change, { reason }).then(() => true).catch(err => { console.error('perms set error:', err.message); return false; });
+            if (ok) done += 1; else failed.push(channel);
+        }
+        const lines = [
+            `updated <@&${role.id}> in ${done} channel${done === 1 ? '' : 's'}.`,
+            `\`-\` allowed: ${picks.allow.map(p => PERM_LABELS[p]).join(', ') || 'nothing'}`,
+            `\`-\` denied: ${picks.deny.map(p => PERM_LABELS[p]).join(', ') || 'nothing'}`,
+            ...(failed.length ? [`\`-\` failed in ${failed.slice(0, 10).map(c => `<#${c.id}>`).join(' ')}${failed.length > 10 ? ' …' : ''}`] : [])
+        ];
+        logInBackground(interaction.guild, {
+            title: 'role permissions set',
+            kind: 'server',
+            color: COLORS.action,
+            fields: [
+                { name: 'role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
+                { name: 'category', value: `<#${category.id}>`, inline: true },
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'channels', value: `${done} updated${failed.length ? `, ${failed.length} failed` : ''}`, inline: true },
+                { name: 'allowed', value: picks.allow.map(p => PERM_LABELS[p]).join(', ') },
+                { name: 'denied', value: picks.deny.map(p => PERM_LABELS[p]).join(', ') }
+            ]
+        });
+        return interaction.editReply(cardPayload(lines.join('\n'), [], failed.length ? 'okite can only allow or deny permissions it has itself.' : null));
+    }
+
+    if (step === 'pmclear') {
+        const targets = [category, ...categoryChildren(category)].filter(c => c.permissionOverwrites?.cache?.has(role.id));
+        await interaction.update(cardPayload(`removing from ${targets.length} channel${targets.length === 1 ? '' : 's'}…`));
+        let done = 0;
+        const failed = [];
+        for (const channel of targets) {
+            const ok = await channel.permissionOverwrites.delete(role.id, reason).then(() => true).catch(err => { console.error('perms clear error:', err.message); return false; });
+            if (ok) done += 1; else failed.push(channel);
+        }
+        logInBackground(interaction.guild, {
+            title: 'role permissions removed',
+            kind: 'server',
+            color: COLORS.action,
+            fields: [
+                { name: 'role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
+                { name: 'category', value: `<#${category.id}>`, inline: true },
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'channels', value: `${done} cleared${failed.length ? `, ${failed.length} failed` : ''}`, inline: true }
+            ]
+        });
+        return interaction.editReply(cardPayload(`removed <@&${role.id}>'s permissions from ${done} channel${done === 1 ? '' : 's'}.${failed.length ? `\n\`-\` failed in ${failed.slice(0, 10).map(c => `<#${c.id}>`).join(' ')}` : ''}`));
+    }
+    return null;
+}
+
 async function runExtraCommand(interaction, { isMod, isManager }) {
+    if (interaction.commandName === 'perms') return runPermsCommand(interaction);
     if (interaction.commandName === 'modmail') return runModmailCommand(interaction, { isMod, isManager });
     return null;
 }
 
-const EXTRA_COMMANDS = ['modmail'];
+const EXTRA_COMMANDS = ['modmail', 'perms'];
 
 client.on(Events.MessageCreate, safe(async (message) => {
     if (!message.guild) {
@@ -7505,7 +7792,46 @@ async function readMemberChange(oldMember, newMember) {
     return found;
 }
 
+client.on(Events.UserUpdate, safe(async (oldUser, newUser) => {
+    if (oldUser.partial || newUser.bot || oldUser.avatar === newUser.avatar) return;
+    const guilds = [...client.guilds.cache.values()].filter(g => g.members.cache.has(newUser.id));
+    if (!guilds.length) return;
+    const [before, after] = await Promise.all([
+        oldUser.avatar ? keepPicture(oldUser.displayAvatarURL({ size: 256 }), 'before') : null,
+        keepPicture(newUser.displayAvatarURL({ size: 256 }), 'after')
+    ]);
+    for (const guild of guilds) {
+        await sendLog(guild, {
+            title: 'avatar changed',
+            kind: 'members',
+            color: COLORS.action,
+            icon: newUser.displayAvatarURL({ size: 256 }),
+            spoiler: false,
+            uploads: [before, after].filter(Boolean),
+            fields: [
+                { name: 'user', value: who(newUser), inline: true },
+                { name: 'before', value: !oldUser.avatar ? 'default avatar' : before ? '' : 'no longer available', inline: true }
+            ]
+        }).catch(err => console.error('avatar log error:', err.message));
+    }
+}));
+
 client.on(Events.GuildMemberUpdate, safe(async (oldMember, newMember) => {
+    if (!oldMember.partial && oldMember.avatar !== newMember.avatar) {
+        const [before, after] = await Promise.all([
+            oldMember.avatar ? keepPicture(oldMember.avatarURL({ size: 256 }), 'before') : null,
+            newMember.avatar ? keepPicture(newMember.avatarURL({ size: 256 }), 'after') : null
+        ]);
+        logInBackground(newMember.guild, {
+            title: newMember.avatar ? 'server avatar changed' : 'server avatar removed',
+            kind: 'members',
+            color: COLORS.action,
+            icon: newMember.displayAvatarURL({ size: 256 }),
+            spoiler: false,
+            uploads: [before, after].filter(Boolean),
+            fields: [{ name: 'user', value: who(newMember.user), inline: true }]
+        });
+    }
     if (!oldMember.partial && oldMember.communicationDisabledUntilTimestamp > Date.now() && !(newMember.communicationDisabledUntilTimestamp > Date.now())) {
         endPunishments(newMember.guild.id, newMember.id, 'mute').catch(() => null);
     }

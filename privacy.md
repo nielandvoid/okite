@@ -34,7 +34,7 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 
 ## Logs and transcripts
 
-Okite posts logs (rule citations, purges, bans, message edits and deletes with their text, joins and leaves, role and nickname changes, voice activity) to the log channels that each server's admins choose. Ban transcripts and any archived attachments are posted there too. That content then lives in Discord, under that server's control and permissions, not in Okite's database.
+Okite posts logs (rule citations, purges, bans, message edits and deletes with their text, joins and leaves, role, nickname and avatar changes, voice activity) to the log channels that each server's admins choose. Ban transcripts and any archived attachments are posted there too. That content then lives in Discord, under that server's control and permissions, not in Okite's database.
 
 ## What Okite does not do
 

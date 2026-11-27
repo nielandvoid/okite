@@ -45,7 +45,7 @@ const guildSchema = new mongoose.Schema({
     modRoleId: { type: String, default: null },
     modmailEnabled: { type: Boolean, default: false },
     modmailChannelId: { type: String, default: null },
-    modmailAsServer: { type: Boolean, default: false },
+    modmailAsServer: { type: Boolean, default: true },
     modmailPing: { type: Boolean, default: true },
     modmailGreeting: { type: String, default: null },
     modmailCloseMessage: { type: String, default: null },
