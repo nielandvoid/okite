@@ -29,6 +29,7 @@ const {
     ChannelType,
     Routes
 } = require("discord.js"); require("dotenv").config();
+const zlib = require('zlib');
 
 const http = require('http');
 const PORT = process.env.PORT || 3000;
@@ -6613,6 +6614,86 @@ const cardPayload = (content, rows = [], footer = null) => {
 const pictureEmojis = new Map();
 let pictureEmojisLoaded = null;
 const MAX_PICTURE_EMOJIS = 1500;
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+});
+const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+};
+function roundPng(buf) {
+    if (buf.length < 33 || buf.readUInt32BE(0) !== 0x89504e47) return buf;
+    let at = 8, width = 0, height = 0, depth = 0, type = 0, interlace = 0, palette = null, alphas = null;
+    const data = [];
+    while (at + 8 <= buf.length) {
+        const len = buf.readUInt32BE(at);
+        const name = buf.toString('ascii', at + 4, at + 8);
+        const body = buf.subarray(at + 8, at + 8 + len);
+        if (name === 'IHDR') [width, height, depth, type, interlace] = [body.readUInt32BE(0), body.readUInt32BE(4), body[8], body[9], body[12]];
+        else if (name === 'PLTE') palette = body;
+        else if (name === 'tRNS') alphas = body;
+        else if (name === 'IDAT') data.push(body);
+        else if (name === 'IEND') break;
+        at += 12 + len;
+    }
+    const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[type];
+    if (depth !== 8 || interlace || !channels || !width || !height || (type === 3 && !palette)) return buf;
+    const raw = zlib.inflateSync(Buffer.concat(data));
+    const stride = width * channels;
+    const px = Buffer.alloc(stride * height);
+    for (let y = 0; y < height; y++) {
+        const filter = raw[y * (stride + 1)];
+        const row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+        const out = y * stride;
+        for (let x = 0; x < stride; x++) {
+            const a = x >= channels ? px[out + x - channels] : 0;
+            const b = y ? px[out - stride + x] : 0;
+            const c = x >= channels && y ? px[out - stride + x - channels] : 0;
+            let v = row[x];
+            if (filter === 1) v += a;
+            else if (filter === 2) v += b;
+            else if (filter === 3) v += (a + b) >> 1;
+            else if (filter === 4) {
+                const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+                v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+            }
+            px[out + x] = v & 0xff;
+        }
+    }
+    const rgba = Buffer.alloc(width * height * 4);
+    const cx = width / 2, cy = height / 2, r = Math.min(cx, cy);
+    for (let i = 0; i < width * height; i++) {
+        const s = i * channels, o = i * 4;
+        let R, G, B, A = 255;
+        if (type === 6) [R, G, B, A] = [px[s], px[s + 1], px[s + 2], px[s + 3]];
+        else if (type === 2) [R, G, B] = [px[s], px[s + 1], px[s + 2]];
+        else if (type === 4) [R, G, B, A] = [px[s], px[s], px[s], px[s + 1]];
+        else if (type === 0) R = G = B = px[s];
+        else [R, G, B, A] = [palette[px[s] * 3], palette[px[s] * 3 + 1], palette[px[s] * 3 + 2], alphas && px[s] < alphas.length ? alphas[px[s]] : 255];
+        const d = Math.hypot((i % width) + 0.5 - cx, Math.floor(i / width) + 0.5 - cy);
+        rgba[o] = R; rgba[o + 1] = G; rgba[o + 2] = B;
+        rgba[o + 3] = Math.round(A * Math.min(1, Math.max(0, r - d + 0.5)));
+    }
+    const lines = Buffer.alloc((width * 4 + 1) * height);
+    for (let y = 0; y < height; y++) rgba.copy(lines, y * (width * 4 + 1) + 1, y * width * 4, (y + 1) * width * 4);
+    const chunk = (name, body) => {
+        const head = Buffer.alloc(8);
+        head.writeUInt32BE(body.length, 0);
+        head.write(name, 4, 'ascii');
+        const tail = Buffer.alloc(4);
+        tail.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), body])), 0);
+        return Buffer.concat([head, body, tail]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    return Buffer.concat([buf.subarray(0, 8), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(lines)), chunk('IEND', Buffer.alloc(0))]);
+}
 function loadPictureEmojis() {
     pictureEmojisLoaded ??= client.application.emojis.fetch()
         .then(list => { for (const e of list.values()) if (/^(av|sv)_\d+_/.test(e.name)) pictureEmojis.set(e.name.split('_').slice(0, 2).join('_'), e); })
@@ -6623,7 +6704,7 @@ async function pictureEmoji(kind, id, hash, url) {
     if (!client.application || !url) return '';
     await loadPictureEmojis();
     const key = `${kind}_${id}`;
-    const name = `${key}_${String(hash || 'none').replace(/[^a-z0-9]/gi, '').slice(0, 8)}`.slice(0, 32);
+    const name = `${key}_${String(hash || 'none').replace(/[^a-z0-9]/gi, '').slice(0, 7)}o`.slice(0, 32);
     const current = pictureEmojis.get(key);
     if (current?.name === name) {
         pictureEmojis.delete(key);
@@ -6633,7 +6714,7 @@ async function pictureEmoji(kind, id, hash, url) {
     try {
         const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`status ${res.status}`);
-        const emoji = await client.application.emojis.create({ attachment: Buffer.from(await res.arrayBuffer()), name });
+        const emoji = await client.application.emojis.create({ attachment: roundPng(Buffer.from(await res.arrayBuffer())), name });
         if (current) current.delete().catch(() => null);
         pictureEmojis.delete(key);
         pictureEmojis.set(key, emoji);
@@ -6648,9 +6729,9 @@ async function pictureEmoji(kind, id, hash, url) {
         return '';
     }
 }
-const userEmoji = (user) => (user ? pictureEmoji('av', user.id, user.avatar ?? 'default', user.displayAvatarURL?.({ extension: 'png', size: 64 })) : '');
-const guildEmoji = (guild) => pictureEmoji('sv', guild.id, guild.icon, guild.iconURL?.({ extension: 'png', size: 64 }));
-const withPicture = async (picture, label) => `${(await picture) || ''} ${label}`.trim();
+const userEmoji = (user) => (user ? pictureEmoji('av', user.id, user.avatar ?? 'default', user.displayAvatarURL?.({ extension: 'png', size: 128 })) : '');
+const guildEmoji = (guild) => pictureEmoji('sv', guild.id, guild.icon, guild.iconURL?.({ extension: 'png', size: 128 }));
+const withPicture = async (picture, label) => `${(await picture) || ''}  ${label}`.trim();
 const unix = (value) => Math.floor(new Date(value).getTime() / 1000);
 const userName = (user, fallback) => plainText(user?.username ?? fallback ?? 'unknown');
 
