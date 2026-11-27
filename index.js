@@ -25,7 +25,9 @@ const {
     FileBuilder,
     MediaGalleryBuilder,
     MediaGalleryItemBuilder,
-    ComponentType
+    ComponentType,
+    ChannelType,
+    Routes
 } = require("discord.js"); require("dotenv").config();
 
 const http = require('http');
@@ -40,10 +42,16 @@ const FULL_INTENTS = [
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.DirectMessages
 ];
 const LIMITED_INTENTS = FULL_INTENTS.filter(i => i !== GatewayIntentBits.GuildMembers && i !== GatewayIntentBits.MessageContent);
-const clientOptions = { presence: { status: 'idle' }, failIfNotExists: false, partials: [Partials.Message, Partials.Channel] };
+const clientOptions = {
+    presence: { status: 'idle' },
+    failIfNotExists: false,
+    partials: [Partials.Message, Partials.Channel],
+    rest: { rejectOnRateLimit: (info) => /\/(webhooks|interactions)\//.test(info.route) && info.timeToReset > 10_000 }
+};
 function authInteractionRequests(c) {
     const request = c.rest.request.bind(c.rest);
     c.rest.request = (options) => {
@@ -59,7 +67,9 @@ let client = authInteractionRequests(new Client({ ...clientOptions, intents: FUL
 const mongoose = require('mongoose');
 const Guild = require('./models/guild');
 const Appeal = require('./models/appeal');
+const Ticket = require('./models/ticket');
 const { auditGuild, reportText } = require('./audit');
+const { guildModmail } = require('./modmail-commands');
 
 if (process.env.MONGODB_URI) {
     mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000, socketTimeoutMS: 20_000, heartbeatFrequencyMS: 10_000 })
@@ -1220,7 +1230,10 @@ async function deleteGuildData(guildId) {
         if (error) throw new Error(`${table}: ${error.message}`);
     }
     await supabase.from('bot_state').delete().eq('key', `case_floor:${guildId}`);
-    if (process.env.MONGODB_URI) await Guild.deleteOne({ guildId });
+    if (process.env.MONGODB_URI) {
+        await Guild.deleteOne({ guildId });
+        await Promise.all([Appeal.deleteMany({ guildId }), Ticket.deleteMany({ guildId })]);
+    }
     guildConfigCache.delete(guildId);
 }
 
@@ -2834,6 +2847,8 @@ async function handleInteraction(interaction) {
     if (interaction.isAutocomplete?.()) return handleAutocomplete(interaction).catch(() => interaction.respond([]).catch(() => null));
     if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appeal|appealnext|appealmodal):/.test(interaction.customId)) return handleAppealStart(interaction);
     if ((interaction.isButton?.() || interaction.isModalSubmit?.()) && /^(appealdecide|appealdeny):/.test(interaction.customId)) return handleAppealDecision(interaction);
+    if ((interaction.isButton?.() || interaction.isModalSubmit?.() || interaction.isStringSelectMenu?.()) && /^(mmopen|mmopenpick|mmcancel|mmcloseask|mmcloseyes|mmswitch|mmreply|mmreplymodal|mmclaim|mmclose|mmclosemodal)(:|$)/.test(interaction.customId)) return handleModmailComponent(interaction);
+    if (interaction.isChatInputCommand?.() && !interaction.guild && interaction.commandName === 'modmail') return runDmModmail(interaction);
 
     if (!interaction.guild) {
         return interaction.reply({ content: 'okite is a server-only utility.', ephemeral: true });
@@ -2849,6 +2864,8 @@ async function handleInteraction(interaction) {
         if (['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'alias', 'rule', 'lock', 'unlock', 'slowmode'].includes(commandName) && !isManager) {
             return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
         }
+
+        if (EXTRA_COMMANDS.includes(commandName)) return runExtraCommand(interaction, { isMod, isManager });
 
         if (commandName === 'prefix') {
             const sub = options.getSubcommand();
@@ -3214,11 +3231,8 @@ async function handleInteraction(interaction) {
 
         if (commandName === 'ping') {
             const started = Date.now();
-            const slash = Boolean(interaction.token);
-            if (slash) console.log(`ping: interaction ${interaction.id} received ${started - interaction.createdTimestamp}ms after it was sent`);
             await interaction.reply({ content: 'pinging…', ephemeral: true });
             const apiMs = Date.now() - started;
-            if (slash) console.log(`ping: reply acknowledged in ${apiMs}ms`);
 
             const timed = async (fn) => {
                 const t = Date.now();
@@ -3243,10 +3257,7 @@ async function handleInteraction(interaction) {
                 ...(!supabaseMs && !mongoMs ? ['**database:** not configured'] : []),
                 `**uptime:** ${formatDuration(process.uptime() * 1000)}`
             ];
-            if (slash) console.log('ping: checks done, editing reply');
-            return interaction.editReply(lines.join('\n'))
-                .then(() => { if (slash) console.log(`ping: reply edited after ${Date.now() - started}ms`); })
-                .catch(err => console.error(`ping edit failed after ${Date.now() - started}ms:`, err?.message || err));
+            return interaction.editReply(lines.join('\n')).catch(err => console.error(`ping edit failed after ${Date.now() - started}ms:`, err?.message || err));
         }
 
         if (commandName === 'logchannels') {
@@ -4261,8 +4272,6 @@ async function handleInteraction(interaction) {
 }
 
 client.rest.on('rateLimited', (info) => console.warn(`rate limited: ${info.method} ${info.route} for ${info.timeToReset}ms (global: ${info.global}, limit: ${info.limit})`));
-client.rest.on('restDebug', (info) => { if (/webhooks|interactions/i.test(info)) console.log(`rest debug: ${String(info).replace(/[A-Za-z0-9_.-]{40,}/g, '<token>')}`); });
-client.rest.on('response', (request, response) => { if (/\/(webhooks|interactions)\//.test(request.route)) console.log(`rest response: ${request.method} ${request.route} ${response.status}`); });
 client.rest.on('invalidRequestWarning', (info) => console.warn(`invalid requests: ${info.count} in this window, resets in ${info.remainingTime}ms`));
 
 client.on(Events.InteractionCreate, (interaction) => {
@@ -4617,7 +4626,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
-    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', modmail: 'modmail', mm: 'modmail', reply: 'reply', r: 'reply', sreply: 'sreply', sr: 'sreply', areply: 'sreply', ar: 'sreply', close: 'close', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
@@ -4635,6 +4644,7 @@ const prefixCache = new Map();
 
 const HELP_GROUPS = [
     ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
+    ['members', ['modmail', 'reply', 'close']],
     ['infractions', ['infraction', 'alias']],
     ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule']],
     ['utility', ['ping', 'help', 'security-audit']]
@@ -5127,6 +5137,61 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
         return { commandName: 'bancleanup', subcommand, values };
     }
 
+    if (name === 'reply' || name === 'sreply') {
+        const text = argText.trim();
+        [...message.attachments.values()].slice(0, RELAY_FILE_SLOTS.length).forEach((a, i) => { values[RELAY_FILE_SLOTS[i]] = a; });
+        if (!text && !message.attachments.size) return fail(`syntax: \`${PREFIX}${name} <message>\` inside a modmail ticket thread${name === 'reply' ? ` (\`${PREFIX}sreply\` sends it as the server)` : ''}`);
+        values.message = text;
+        if (name === 'sreply') values.as_server = true;
+        return { commandName: 'modmail', subcommand: 'reply', values };
+    }
+
+    if (name === 'close') {
+        const quiet = /(^|\s)(--silent|-s)(?=\s|$)/i;
+        values.silent = quiet.test(argText);
+        values.reason = argText.replace(quiet, '$1').trim() || null;
+        return { commandName: 'modmail', subcommand: 'close', values };
+    }
+
+    if (name === 'modmail') {
+        const first = args[0]?.toLowerCase();
+        const syntax = `syntax: \`${PREFIX}modmail\` to show, \`${PREFIX}modmail setup #channel\`, \`${PREFIX}modmail off\`, \`${PREFIX}modmail greeting <text|reset>\`, \`${PREFIX}modmail closing <text|reset>\`, \`${PREFIX}modmail block|unblock @user\` or \`${PREFIX}modmail open @user <message>\``;
+        if (!first || ['settings', 'show'].includes(first)) return { commandName: 'modmail', subcommand: 'settings', values };
+        if (first === 'off') return { commandName: 'modmail', subcommand: 'off', values };
+        if (first === 'setup') {
+            const channel = resolvePrefixChannel(message.guild, args[1]);
+            if (!channel) return fail(syntax);
+            values.channel = channel;
+            for (const word of args.slice(2).map(w => w.toLowerCase())) {
+                if (word === 'server' || word === 'asserver') values.as_server = true;
+                if (word === 'signed') values.as_server = false;
+                if (word === 'noping') values.ping = false;
+                if (word === 'ping') values.ping = true;
+            }
+            return { commandName: 'modmail', subcommand: 'setup', values };
+        }
+        if (first === 'greeting' || first === 'closing') {
+            values.text = restAfter(argText, 1) || 'reset';
+            return { commandName: 'modmail', subcommand: first, values };
+        }
+        if (first === 'block' || first === 'unblock') {
+            const user = await resolvePrefixUser(args[1]);
+            if (!user) return fail(syntax);
+            values.user = user;
+            return { commandName: 'modmail', subcommand: first, values };
+        }
+        if (first === 'open') {
+            const user = await resolvePrefixUser(args[1]);
+            const text = restAfter(argText, 2);
+            if (!user || (!text && !message.attachments.size)) return fail(`syntax: \`${PREFIX}modmail open @user <message>\``);
+            [...message.attachments.values()].slice(0, RELAY_FILE_SLOTS.length).forEach((a, i) => { values[RELAY_FILE_SLOTS[i]] = a; });
+            values.user = user;
+            values.message = text;
+            return { commandName: 'modmail', subcommand: 'open', values };
+        }
+        return fail(syntax);
+    }
+
     if (name === 'modrole') {
         const first = args[0]?.toLowerCase();
         if (!first || first === 'show') return { commandName: 'modrole', subcommand, values };
@@ -5368,6 +5433,7 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'appeals') return subcommand === 'list';
     if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
+    if (commandName === 'modmail') return ['settings', 'reply'].includes(subcommand);
     return false;
 }
 
@@ -5408,6 +5474,7 @@ function createPrefixInteraction(message, commandName, subcommand, values) {
         channel: message.channel,
         channelId: message.channelId,
         user: message.author,
+        sourceMessage: message,
         member: message.member,
         memberPermissions: message.member.permissions,
         replied: false,
@@ -6024,6 +6091,7 @@ client.on(Events.GuildDelete, safe(async (guild) => {
 }));
 
 client.on(Events.GuildCreate, safe(async (guild) => {
+    client.rest.put(Routes.applicationGuildCommands(client.user.id, guild.id), { body: [guildModmail()] }).catch(err => console.error('guild command registration error:', err.message));
     if (supabase) await clearGuildRemoved(guild.id);
 }));
 
@@ -6081,7 +6149,8 @@ async function getExtras(guildId) {
         watchdog: { enabled: src.watchdogEnabled !== false, channels: src.watchdogChannels || 3, seconds: src.watchdogSeconds || 30, mute: src.watchdogMute || '1d' },
         honeypot: { channelId: src.honeypotChannelId || null, action: src.honeypotAction || 'softban', invite: !!src.honeypotInvite },
         appeals: { enabled: !!src.appealsEnabled, channelId: src.appealsChannelId || null, questions: custom ? src.appealQuestions.map(q => ({ label: q.label, hint: q.hint || '' })) : [], custom, blocked: Array.isArray(src.appealBlocked) ? src.appealBlocked : [] },
-        modRoleId: src.modRoleId || null
+        modRoleId: src.modRoleId || null,
+        modmail: { enabled: !!src.modmailEnabled, channelId: src.modmailChannelId || null, asServer: !!src.modmailAsServer, ping: src.modmailPing !== false, greeting: src.modmailGreeting || null, closeMessage: src.modmailCloseMessage || null, blocked: Array.isArray(src.modmailBlocked) ? src.modmailBlocked : [] }
     };
     extrasCache.set(guildId, extras);
     return extras;
@@ -6353,7 +6422,7 @@ async function submitAppeal(interaction, guild, appeals, kind, caseNumber, quest
         return say('okite could not post the appeal in the server\'s appeal channel. try again later.');
     }
     await appealStore.update(record._id, { channelId: sent.channelId, messageId: sent.id });
-    return say(`your appeal was sent to the mods of ${plainText(guild.name)}. you will get a DM when they decide.`);
+    return say(`your appeal was routed to ${plainText(guild.name)} moderators. you will get a DM when they decide.`);
 }
 
 function renderAppeal({ record, user, target, decision }) {
@@ -6461,8 +6530,787 @@ const describeExtras = {
     modRole: (id) => (id ? `mod role is <@&${id}>. it is pinged on compromised-account alerts and attachment prompts.` : 'no mod role. set one with `/modrole role:@role`.')
 };
 
+const memoryStores = new Map();
+const matchesFilter = (doc, filter) => Object.entries(filter).every(([key, want]) => {
+    const have = doc[key];
+    if (want && typeof want === 'object' && !Array.isArray(want) && !(want instanceof Date)) {
+        return Object.entries(want).every(([op, value]) => {
+            if (op === '$lte') return have <= value;
+            if (op === '$gte') return have >= value;
+            if (op === '$in') return value.includes(have);
+            if (op === '$ne') return have !== value;
+            return false;
+        });
+    }
+    return have === want;
+});
+
+function docStore(Model, name) {
+    const useDb = () => Boolean(process.env.MONGODB_URI);
+    const mem = () => {
+        if (!memoryStores.has(name)) memoryStores.set(name, new Map());
+        return memoryStores.get(name);
+    };
+    const sortRows = (rows, sort) => {
+        if (!sort) return rows;
+        const [[key, dir]] = Object.entries(sort);
+        return rows.sort((a, b) => (a[key] > b[key] ? 1 : a[key] < b[key] ? -1 : 0) * dir);
+    };
+    const store = {
+        async create(data) {
+            if (useDb()) return (await Model.create(data)).toObject();
+            const now = new Date();
+            const record = { ...data, _id: require('node:crypto').randomUUID(), createdAt: now, updatedAt: now };
+            mem().set(String(record._id), record);
+            return record;
+        },
+        async get(id) {
+            if (useDb()) return Model.findById(id).lean().catch(() => null);
+            return mem().get(String(id)) ?? null;
+        },
+        async find(filter, { sort, limit } = {}) {
+            if (useDb()) {
+                let query = Model.find(filter);
+                if (sort) query = query.sort(sort);
+                if (limit) query = query.limit(limit);
+                return query.lean();
+            }
+            const rows = sortRows([...mem().values()].filter(d => matchesFilter(d, filter)), sort);
+            return limit ? rows.slice(0, limit) : rows;
+        },
+        async findOne(filter, sort) {
+            return (await store.find(filter, { sort, limit: 1 }))[0] ?? null;
+        },
+        async count(filter) {
+            if (useDb()) return Model.countDocuments(filter);
+            return [...mem().values()].filter(d => matchesFilter(d, filter)).length;
+        },
+        async update(id, patch) {
+            if (useDb()) return Model.updateOne({ _id: id }, patch);
+            const record = mem().get(String(id));
+            if (record) Object.assign(record, patch, { updatedAt: new Date() });
+        },
+        async remove(id) {
+            if (useDb()) return Model.deleteOne({ _id: id });
+            mem().delete(String(id));
+        }
+    };
+    return store;
+}
+
+const ticketStore = docStore(Ticket, 'tickets');
+
+const MODMAIL_UPLOAD_BYTES = 10 * 1024 * 1024;
+const modmailPrompted = new Map();
+const modmailQuiet = new Map();
+const plainCard = (content) => new ContainerBuilder().addTextDisplayComponents(textBlock(content));
+const cardPayload = (content, rows = [], footer = null) => {
+    const card = plainCard(content);
+    if (footer) card.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`-# ${footer}`));
+    return { flags: V2_FLAG, components: [card, ...rows], allowedMentions: { parse: [] } };
+};
+
+const pictureEmojis = new Map();
+let pictureEmojisLoaded = null;
+const MAX_PICTURE_EMOJIS = 1500;
+function loadPictureEmojis() {
+    pictureEmojisLoaded ??= client.application.emojis.fetch()
+        .then(list => { for (const e of list.values()) if (/^(av|sv)_\d+_/.test(e.name)) pictureEmojis.set(e.name.split('_').slice(0, 2).join('_'), e); })
+        .catch(err => { console.error('app emoji fetch error:', err.message); pictureEmojisLoaded = null; });
+    return pictureEmojisLoaded;
+}
+async function pictureEmoji(kind, id, hash, url) {
+    if (!client.application || !url) return '';
+    await loadPictureEmojis();
+    const key = `${kind}_${id}`;
+    const name = `${key}_${String(hash || 'none').replace(/[^a-z0-9]/gi, '').slice(0, 8)}`.slice(0, 32);
+    const current = pictureEmojis.get(key);
+    if (current?.name === name) {
+        pictureEmojis.delete(key);
+        pictureEmojis.set(key, current);
+        return `<:${current.name}:${current.id}>`;
+    }
+    try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const emoji = await client.application.emojis.create({ attachment: Buffer.from(await res.arrayBuffer()), name });
+        if (current) current.delete().catch(() => null);
+        pictureEmojis.delete(key);
+        pictureEmojis.set(key, emoji);
+        while (pictureEmojis.size > MAX_PICTURE_EMOJIS) {
+            const [oldKey, old] = pictureEmojis.entries().next().value;
+            pictureEmojis.delete(oldKey);
+            old.delete().catch(() => null);
+        }
+        return `<:${emoji.name}:${emoji.id}>`;
+    } catch (err) {
+        console.error('picture emoji error:', err.message);
+        return '';
+    }
+}
+const userEmoji = (user) => (user ? pictureEmoji('av', user.id, user.avatar ?? 'default', user.displayAvatarURL?.({ extension: 'png', size: 64 })) : '');
+const guildEmoji = (guild) => pictureEmoji('sv', guild.id, guild.icon, guild.iconURL?.({ extension: 'png', size: 64 }));
+const withPicture = async (picture, label) => `${(await picture) || ''} ${label}`.trim();
+const unix = (value) => Math.floor(new Date(value).getTime() / 1000);
+const userName = (user, fallback) => plainText(user?.username ?? fallback ?? 'unknown');
+
+function componentText(components = []) {
+    const out = [];
+    for (const c of components) {
+        if (typeof c.content === 'string') out.push(c.content);
+        if (Array.isArray(c.components)) out.push(componentText(c.components));
+    }
+    return out.filter(Boolean).join('\n');
+}
+
+async function userRecord(guild, userId) {
+    const rows = supabase
+        ? (await supabase.from('infractions').select('*').eq('guild_id', guild.id).eq('target_user_id', userId).order('created_at', { ascending: false }).limit(200)).data || []
+        : [];
+    const counted = rows.filter(r => r.status !== 'voided');
+    const counts = {};
+    for (const r of counted) {
+        const type = INFRACTION_TYPES[r.action_type] || 'warn';
+        counts[type] = (counts[type] || 0) + 1;
+    }
+    const tickets = await ticketStore.count({ guildId: guild.id, userId }).catch(() => 0);
+    return { rows, counts, total: counted.length, tickets };
+}
+
+const countsText = (record) => (record.total ? `${record.total} (${Object.entries(record.counts).map(([type, n]) => `${type} ${n}`).join(' / ')})` : 'none');
+
+function renderTicketHeader({ ticket, user, member, record }) {
+    const facts = [
+        `> user: <@${ticket.userId}> / ${userName(user, ticket.userId)} / \`${ticket.userId}\``,
+        `> account: created <t:${Math.floor(snowflakeTime(ticket.userId) / 1000)}:R>`,
+        `> member: ${member?.joinedTimestamp ? `joined <t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'not in the server'}`,
+        ...(record ? [`> infractions: ${countsText(record)}`, `> earlier tickets: ${Math.max(0, record.tickets - 1)}`] : [])
+    ].join('\n');
+    const container = containerHeader(new ContainerBuilder(), `modmail \`#${ticket.number}\`\n${facts}`, user?.displayAvatarURL?.() || okiteIcon());
+    const status = ticket.status === 'closed'
+        ? `closed by <@${ticket.closedBy}> <t:${unix(ticket.closedAt ?? Date.now())}:R>`
+        : ticket.claimedBy ? `claimed by <@${ticket.claimedBy}>` : 'open';
+    const openedBy = ticket.openedBy && ticket.openedBy !== ticket.userId ? ` by <@${ticket.openedBy}>` : '';
+    const reason = ticket.status === 'closed' && ticket.closeReason ? `\n> ${clip(ticket.closeReason.replace(/\s+/g, ' '), 300)}` : '';
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`-# opened <t:${unix(ticket.createdAt ?? Date.now())}:R>${openedBy} / ${status}${reason}`));
+    const components = [container];
+    if (ticket.status !== 'closed') {
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:0`).setLabel('Reply').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`mmreply:${ticket._id}:1`).setLabel('Reply as server').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`mmclaim:${ticket._id}`).setLabel(ticket.claimedBy ? 'Unclaim' : 'Claim').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`mmclose:${ticket._id}`).setLabel('Close').setStyle(ButtonStyle.Danger)
+        ));
+    }
+    return { flags: V2_FLAG, components, allowedMentions: { parse: [] } };
+}
+
+async function ticketThread(ticket) {
+    if (!ticket?.threadId) return null;
+    return client.channels.cache.get(ticket.threadId) ?? await client.channels.fetch(ticket.threadId).catch(() => null);
+}
+
+async function refreshTicketHeader(ticket) {
+    const guild = client.guilds.cache.get(ticket.guildId);
+    if (!guild || !ticket.headerId || !ticket.channelId) return;
+    const channel = guild.channels.cache.get(ticket.channelId) ?? client.channels.cache.get(ticket.channelId) ?? await client.channels.fetch(ticket.channelId).catch(() => null);
+    const message = channel && await channel.messages.fetch(ticket.headerId).catch(() => null);
+    if (!message) return;
+    const [user, member, record] = await Promise.all([
+        client.users.fetch(ticket.userId).catch(() => null),
+        guild.members.fetch(ticket.userId).catch(() => null),
+        userRecord(guild, ticket.userId).catch(() => null)
+    ]);
+    await message.edit(renderTicketHeader({ ticket, user, member, record })).catch(err => console.error('ticket header edit error:', err.message));
+}
+
+async function modmailGuildsFor(user) {
+    const out = [];
+    for (const guild of client.guilds.cache.values()) {
+        const settings = (await getExtras(guild.id)).modmail;
+        if (!settings.enabled || !settings.channelId || settings.blocked.includes(user.id)) continue;
+        const member = await guild.members.fetch(user.id).catch(() => null);
+        if (member) out.push(guild);
+    }
+    return out;
+}
+
+async function openTicket(guild, user, openedBy) {
+    const extras = await getExtras(guild.id);
+    const settings = extras.modmail;
+    const existing = await ticketStore.findOne({ guildId: guild.id, userId: user.id, status: 'open' });
+    if (existing) {
+        const thread = await ticketThread(existing);
+        if (thread) return { ticket: existing, thread, existing: true };
+        await ticketStore.update(existing._id, { status: 'closed', closedBy: client.user.id, closedAt: new Date(), closeReason: 'the ticket thread was deleted' });
+    }
+    const channel = settings.channelId && (guild.channels.cache.get(settings.channelId) ?? await guild.channels.fetch(settings.channelId).catch(() => null));
+    if (!channel) return { error: 'the server\'s modmail channel is missing' };
+    const number = (await ticketStore.count({ guildId: guild.id })) + 1;
+    const ticket = await ticketStore.create({ guildId: guild.id, userId: user.id, number, openedBy, status: 'open', lastActivity: new Date() });
+    const [member, record] = await Promise.all([guild.members.fetch(user.id).catch(() => null), userRecord(guild, user.id).catch(() => null)]);
+    const header = renderTicketHeader({ ticket, user, member, record });
+    const name = clip(`${user.username} #${number}`, 100);
+    let thread = null;
+    let headerMessage = null;
+    try {
+        if (channel.type === ChannelType.GuildForum) {
+            thread = await channel.threads.create({ name, message: header });
+            headerMessage = await thread.fetchStarterMessage().catch(() => null);
+        } else {
+            headerMessage = await channel.send(header);
+            thread = await headerMessage.startThread({ name, autoArchiveDuration: 10080 });
+        }
+    } catch (err) {
+        console.error('modmail open error:', err.message);
+        await ticketStore.remove(ticket._id);
+        if (headerMessage) await headerMessage.delete().catch(() => null);
+        return { error: 'okite could not create the ticket thread (it needs View Channel, Send Messages and Create Public Threads in the modmail channel)' };
+    }
+    const patch = { channelId: headerMessage?.channelId ?? thread.id, headerId: headerMessage?.id ?? null, threadId: thread.id };
+    await ticketStore.update(ticket._id, patch);
+    Object.assign(ticket, patch);
+    const ping = settings.ping ? extras.modRoleId : null;
+    if (ping) await thread.send({ content: `<@&${ping}>`, allowedMentions: { parse: [], roles: [ping] } }).catch(() => null);
+    logInBackground(guild, {
+        title: `modmail ticket opened: #${number}`,
+        kind: 'general',
+        color: COLORS.info,
+        fields: [
+            { name: 'user', value: who(user), inline: true },
+            { name: 'opened by', value: openedBy === user.id ? 'the user' : `<@${openedBy}>`, inline: true },
+            { name: 'thread', value: `<#${thread.id}>`, inline: true }
+        ]
+    });
+    return { ticket, thread };
+}
+
+const CARD_TEXT_LIMIT = 3600;
+const CARD_SECTION_LIMIT = 10;
+const ticketLocks = new Map();
+function withTicketLock(id, fn) {
+    const key = String(id);
+    const run = (ticketLocks.get(key) ?? Promise.resolve()).then(fn, fn);
+    ticketLocks.set(key, run.catch(() => null));
+    return run;
+}
+
+const emptyRound = () => ({ user: [], mod: [], dmId: null, footer: null });
+const fileList = (attachments) => [...(attachments?.values?.() ?? attachments ?? [])].filter(Boolean).slice(0, 10)
+    .map(a => ({ url: a.url, name: a.name, size: a.size || 0, image: !!a.contentType?.startsWith('image/') }));
+
+function cardSections(parts) {
+    const sections = [];
+    for (const part of parts) {
+        const last = sections.at(-1);
+        if (last && last.head === part.head && !(last.items.at(-1).files?.length)) last.items.push(part);
+        else sections.push({ head: part.head, items: [part] });
+    }
+    return sections;
+}
+
+const cardFits = (parts) => {
+    const sections = cardSections(parts);
+    const length = sections.reduce((n, s) => n + s.head.length + s.items.reduce((m, p) => m + (p.text || '').length + 1, 0) + 8, 0);
+    return length <= CARD_TEXT_LIMIT && sections.length <= CARD_SECTION_LIMIT;
+};
+
+async function renderCard(parts, footer = null) {
+    const container = new ContainerBuilder();
+    const uploads = [];
+    for (const [i, section] of cardSections(parts).entries()) {
+        if (i) container.addSeparatorComponents(divider());
+        const text = section.items.map(p => p.text).filter(Boolean).join('\n');
+        container.addTextDisplayComponents(textBlock(clip(`-# ${section.head}${text ? `\n${text}` : ''}`, 3900)));
+        const files = section.items.flatMap(p => p.files || []);
+        if (!files.length) continue;
+        const got = await downloadAttachments(new Map(files.map((f, k) => [String(k), { url: f.url, name: f.name, size: f.size, contentType: f.image ? 'image/png' : 'application/octet-stream' }])), MODMAIL_UPLOAD_BYTES);
+        for (const u of got.uploads) u.name = `s${i}-${u.name}`;
+        const images = [...got.uploads.filter(u => u.image).map(u => ({ url: `attachment://${u.name}`, alt: u.alt })), ...got.remote.filter(r => r.image).map(r => ({ url: r.url, alt: r.alt }))];
+        if (images.length) container.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(images.slice(0, 10).map(img => new MediaGalleryItemBuilder().setURL(img.url).setDescription(clip(img.alt || 'image', 1000)))));
+        for (const u of got.uploads.filter(u => !u.image)) container.addFileComponents(new FileBuilder().setURL(`attachment://${u.name}`));
+        const links = got.remote.filter(r => !r.image).map(r => r.url);
+        if (links.length) container.addTextDisplayComponents(textBlock(links.map(l => `\`-\` ${l}`).join('\n')));
+        uploads.push(...got.uploads);
+    }
+    if (footer) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`-# ${footer}`));
+    return { flags: V2_FLAG, components: [container], files: uploads.map(u => new AttachmentBuilder(u.buffer, { name: u.name })), allowedMentions: { parse: [] } };
+}
+
+async function addToThread(ticket, thread, part, { fresh = false } = {}) {
+    const state = ticket.thread?.id ? ticket.thread : { id: null, parts: [] };
+    const hasFiles = Boolean(part.files?.length);
+    const canAppend = !fresh && !hasFiles && state.id && thread.lastMessageId === state.id && cardFits([...state.parts, part]);
+    if (canAppend) {
+        const parts = [...state.parts, part];
+        const message = await thread.messages.fetch(state.id).catch(() => null);
+        const edited = message && await message.edit(await renderCard(parts)).catch(() => null);
+        if (edited) return { state: { id: state.id, parts }, message: edited };
+    }
+    const sent = await thread.send(await renderCard([part]));
+    return { state: hasFiles ? { id: null, parts: [] } : { id: sent.id, parts: [part] }, message: sent };
+}
+
+async function dropDeadTicket(ticket) {
+    await ticketStore.update(ticket._id, { status: 'closed', closedBy: client.user.id, closedAt: new Date(), closeReason: 'the ticket thread was deleted', round: null, thread: null });
+}
+
+async function userWrites(ticket, message) {
+    return withTicketLock(ticket._id, async () => {
+        const current = await ticketStore.get(ticket._id);
+        if (!current || current.status !== 'open') return false;
+        const thread = await ticketThread(current);
+        const guildName = plainText(client.guilds.cache.get(current.guildId)?.name ?? 'the server');
+        if (!thread) {
+            await dropDeadTicket(current);
+            await message.reply(`your ticket with ${guildName} was removed on their side. send a message to open a new one.`).catch(() => null);
+            return false;
+        }
+        const files = fileList(message.attachments);
+        if (!message.content && !files.length) {
+            await message.reply('only text and files can be passed on to the mods.').catch(() => null);
+            return false;
+        }
+        const head = await withPicture(userEmoji(message.author), userName(message.author));
+        const text = clip(message.content || '', 1900);
+        const frozen = Boolean(current.round?.mod?.length);
+        const round = frozen || !current.round ? emptyRound() : current.round;
+        round.user.push({ head, text: [text, ...files.map(f => `\`[file: ${plainText(f.name)}]\``)].filter(Boolean).join('\n') });
+        let placed;
+        try {
+            placed = await addToThread(current, thread, { head, text, files }, { fresh: frozen });
+        } catch (err) {
+            console.error('modmail relay error:', err.message);
+            await message.reply('okite could not pass that on to the mods. try again in a bit.').catch(() => null);
+            return false;
+        }
+        await ticketStore.update(current._id, { round, thread: placed.state, lastActivity: new Date(), userMessages: (current.userMessages || 0) + 1 });
+        return true;
+    });
+}
+
+async function modWrites({ ticket, guild, mod, text, attachments, asServer, footer = null }) {
+    return withTicketLock(ticket._id, async () => {
+        const current = await ticketStore.get(ticket._id);
+        if (!current || current.status !== 'open') return { error: 'that ticket is closed.' };
+        const user = await client.users.fetch(current.userId).catch(() => null);
+        if (!user) return { error: 'okite could not find that user.' };
+        const files = fileList(attachments);
+        const body = clip((text || '').trim(), 1900);
+        if (!body && !files.length) return { error: 'write a message or attach a file.' };
+        const serverHead = await withPicture(guildEmoji(guild), plainText(guild.name));
+        const modHead = await withPicture(userEmoji(mod), userName(mod));
+        const dmPart = { head: asServer ? serverHead : `${modHead} / ${plainText(guild.name)}`, text: body, files };
+
+        let round = current.round ?? emptyRound();
+        let replacing = round.dmId;
+        if (!cardFits([...round.user, ...round.mod, dmPart])) {
+            round = emptyRound();
+            replacing = null;
+        }
+        round.mod.push(dmPart);
+        if (footer) round.footer = footer;
+        const sent = await user.send(await renderCard([...round.user, ...round.mod], round.footer)).catch(() => null);
+        if (!sent) return { error: 'could not DM them. their DMs are closed or they blocked okite.' };
+        if (replacing) await sent.channel.messages.delete(replacing).catch(() => null);
+        round.dmId = sent.id;
+
+        const thread = await ticketThread(current);
+        let threadState = current.thread;
+        if (thread) {
+            const placed = await addToThread(current, thread, { head: asServer ? `${serverHead} / ${userName(mod)}` : modHead, text: body, files }).catch(err => { console.error('modmail thread error:', err.message); return null; });
+            if (placed) {
+                threadState = placed.state;
+                const kept = [...(placed.message?.attachments?.values?.() ?? [])];
+                if (files.length && kept.length) dmPart.files = kept.map(a => ({ url: a.url, name: a.name.replace(/^s\d+-\d+-/, ''), size: a.size, image: !!a.contentType?.startsWith('image/') }));
+            }
+        }
+        const dmIds = [...(current.dmIds || []).filter(id => id !== replacing), sent.id].slice(-100);
+        await ticketStore.update(current._id, { round, thread: threadState, dmIds, lastActivity: new Date(), modMessages: (current.modMessages || 0) + 1 });
+        return { ok: true, user };
+    });
+}
+
+async function ticketTranscript(thread, ticket, user, guild) {
+    const messages = [];
+    let before;
+    for (let i = 0; i < 5; i++) {
+        const batch = await thread.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+        if (!batch?.size) break;
+        messages.push(...batch.values());
+        before = batch.last().id;
+        if (batch.size < 100) break;
+    }
+    const zone = await getTimezone(guild.id).catch(() => undefined);
+    const lines = [];
+    for (const m of messages.reverse()) {
+        const at = `[${fmtDate(m.createdAt.toISOString(), zone)} ${clockText(m.createdAt, zone)}]`;
+        const files = [...m.attachments.values()].map(a => `[file: ${a.name.replace(/^s\d+-\d+-/, '')}]`).join(' ');
+        const text = [m.content, componentText(m.components)].filter(Boolean).join('\n').replace(/<a?:\w+:\d+>\s*/g, '');
+        if (m.author?.id !== client.user.id) {
+            lines.push(`${at} ${m.author?.username ?? 'unknown'}: ${[text, files].filter(Boolean).join(' ')}`);
+            continue;
+        }
+        let entry = null;
+        for (const line of text.split('\n')) {
+            if (line.startsWith('-# ')) {
+                if (entry) lines.push(entry.body.length ? `${at} ${entry.head}: ${entry.body.join('\n')}` : `${at} ${entry.head}`);
+                entry = { head: line.slice(3).trim(), body: [] };
+            } else if (entry) entry.body.push(line);
+            else entry = { head: 'okite', body: [line] };
+        }
+        if (entry) lines.push(entry.body.length ? `${at} ${entry.head}: ${entry.body.join('\n')}` : `${at} ${entry.head}`);
+        if (files) lines.push(`${at} ${files}`);
+    }
+    return { name: `modmail-${ticket.number}-${user?.username ?? ticket.userId}.txt`, content: lines.join('\n') || '(no messages)' };
+}
+
+async function closeTicket({ ticket, guild, by, reason, silent, byMember = false }) {
+    return withTicketLock(ticket._id, async () => {
+        const current = await ticketStore.get(ticket._id) ?? ticket;
+        if (current.status !== 'open') return 'closed';
+        const patch = { status: 'closed', closedBy: by.id, closedAt: new Date(), closeReason: reason || null, round: null, thread: null };
+        await ticketStore.update(current._id, patch);
+        Object.assign(current, patch);
+        const settings = (await getExtras(guild.id)).modmail;
+        const user = await client.users.fetch(current.userId).catch(() => null);
+        let dm = 'skipped';
+        if (!silent && !byMember && user) {
+            const note = [
+                `your ticket with ${plainText(guild.name)} was closed.`,
+                ...(reason ? [quoteBlock(clip(reason, 900))] : []),
+                ...(settings.closeMessage ? ['', clip(settings.closeMessage, 1500)] : [])
+            ].join('\n');
+            dm = await user.send(cardPayload(note, [], 'text okite again anytime to open a new one.')).then(() => 'sent').catch(() => 'failed');
+        }
+        await refreshTicketHeader(current);
+        const thread = await ticketThread(current);
+        const file = thread ? await ticketTranscript(thread, current, user, guild).catch(() => null) : null;
+        if (thread) {
+            const dmLine = byMember ? null : dm === 'failed' ? 'could not DM them the close note.' : dm === 'skipped' ? 'closed silently, no DM sent.' : null;
+            await thread.send(cardPayload(`-# ${await withPicture(userEmoji(by), userName(by))} closed the ticket${reason ? `\n${quoteBlock(clip(reason, 900))}` : ''}`, [], dmLine)).catch(() => null);
+            await thread.setLocked(true).catch(() => null);
+            await thread.setArchived(true).catch(() => null);
+        }
+        logInBackground(guild, {
+            title: `modmail ticket closed: #${current.number}`,
+            kind: 'general',
+            color: COLORS.muted,
+            fields: [
+                { name: 'user', value: user ? who(user) : `<@${current.userId}>`, inline: true },
+                { name: 'closed by', value: byMember ? `${who(by)} (the user)` : who(by), inline: true },
+                { name: 'messages', value: `${current.userMessages || 0} from them / ${current.modMessages || 0} from mods`, inline: true },
+                { name: 'reason', value: reason || '' },
+                { name: 'DM', value: byMember ? '' : dm === 'sent' ? 'sent' : dm === 'failed' ? 'could not DM them' : 'silent' }
+            ],
+            ...(file ? { file } : {})
+        });
+        return dm;
+    });
+}
+
+async function ticketFromThread(channelId) {
+    return ticketStore.findOne({ threadId: channelId, status: 'open' });
+}
+
+async function openTickets(userId) {
+    const open = (await ticketStore.find({ userId, status: 'open' })).filter(t => client.guilds.cache.has(t.guildId));
+    const at = (t) => new Date(t.activeAt ?? t.createdAt ?? 0).getTime();
+    return open.sort((x, y) => at(y) - at(x));
+}
+
+const guildLabel = (id) => clip(client.guilds.cache.get(id)?.name ?? 'unknown server', 100);
+const cancelButton = () => new ButtonBuilder().setCustomId('mmcancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary);
+
+async function openPrompt(user) {
+    const open = await openTickets(user.id);
+    const guilds = (await modmailGuildsFor(user)).filter(g => !open.some(t => t.guildId === g.id));
+    if (!guilds.length) return null;
+    const explain = '> once it\'s open, everything you send here is routed to the mods, and their replies show up here. type **close** to close the ticket.';
+    if (guilds.length === 1) {
+        return cardPayload(`open a remote-ticket with ${plainText(guilds[0].name)}?\n${explain}`, [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`mmopen:${guilds[0].id}`).setLabel('Open ticket').setStyle(ButtonStyle.Primary),
+            cancelButton()
+        )]);
+    }
+    const menu = new StringSelectMenuBuilder().setCustomId('mmopenpick').setPlaceholder('pick the server')
+        .addOptions(guilds.slice(0, 25).map(g => ({ label: clip(g.name, 100), value: g.id })));
+    return cardPayload(`open a remote-ticket?\n${explain}`, [new ActionRowBuilder().addComponents(menu), new ActionRowBuilder().addComponents(cancelButton())]);
+}
+
+function closePrompt(open) {
+    if (open.length === 1) {
+        return cardPayload(`close your ticket with ${plainText(guildLabel(open[0].guildId))}?`, [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`mmcloseyes:${open[0]._id}`).setLabel('Close').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('mmcancel').setLabel('Keep open').setStyle(ButtonStyle.Secondary)
+        )]);
+    }
+    const menu = new StringSelectMenuBuilder().setCustomId('mmcloseask').setPlaceholder('pick the ticket to close')
+        .addOptions(open.slice(0, 25).map(t => ({ label: guildLabel(t.guildId), value: String(t._id), description: `ticket #${t.number}` })));
+    return cardPayload('which ticket do you want to close?', [new ActionRowBuilder().addComponents(menu), new ActionRowBuilder().addComponents(cancelButton())]);
+}
+
+function switchPrompt(open) {
+    const menu = new StringSelectMenuBuilder().setCustomId('mmswitch').setPlaceholder('pick the server')
+        .addOptions(open.slice(0, 25).map((t, i) => ({ label: guildLabel(t.guildId), value: String(t._id), description: i === 0 ? 'talking to them now' : `ticket #${t.number}` })));
+    return cardPayload(`you're talking to ${plainText(guildLabel(open[0].guildId))}. switch to:`, [new ActionRowBuilder().addComponents(menu), new ActionRowBuilder().addComponents(cancelButton())]);
+}
+
+async function handleModmailDm(message) {
+    const userId = message.author.id;
+    const open = await openTickets(userId);
+    const typed = message.content.trim().toLowerCase();
+    if (open.length && /^\/?close$/.test(typed)) return message.reply(closePrompt(open)).catch(() => null);
+    if (open.length) {
+        const ref = message.reference?.messageId;
+        const target = (ref && open.find(t => (t.dmIds || []).includes(ref))) || open[0];
+        return userWrites(target, message);
+    }
+    if (Date.now() - (modmailPrompted.get(userId) ?? 0) < 2 * 60e3) return null;
+    const prompt = await openPrompt(message.author);
+    if (!prompt) {
+        if (Date.now() - (modmailQuiet.get(userId) ?? 0) < 10 * 60e3) return null;
+        modmailQuiet.set(userId, Date.now());
+        return message.reply('none of the servers you share with okite take modmail, so this message went nowhere.').catch(() => null);
+    }
+    modmailPrompted.set(userId, Date.now());
+    return message.reply(prompt).catch(() => null);
+}
+
+async function startMemberTicket(interaction, guildId) {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return interaction.update(cardPayload('okite is no longer in that server.'));
+    const settings = (await getExtras(guild.id)).modmail;
+    const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!settings.enabled || !settings.channelId || settings.blocked.includes(interaction.user.id) || !member) {
+        return interaction.update(cardPayload(`${plainText(guild.name)} is not taking tickets from you right now.`));
+    }
+    await interaction.update(cardPayload('opening…'));
+    const opened = await openTicket(guild, interaction.user, interaction.user.id);
+    if (opened.error) return interaction.editReply(cardPayload(`${opened.error}, so the ticket could not be opened. try again later.`));
+    await ticketStore.update(opened.ticket._id, { activeAt: new Date() });
+    modmailPrompted.delete(interaction.user.id);
+    const greeting = settings.greeting ? `\n${quoteBlock(clip(settings.greeting, 1500))}` : '';
+    const others = (await openTickets(interaction.user.id)).length > 1 ? ' use /modmail switch to talk to another server.' : '';
+    return interaction.editReply(cardPayload(`remote-ticket open with ${plainText(guild.name)}. type your message here, and the mods' replies will show up in this DM.${greeting}`, [], `type **close** to end it.${others}`));
+}
+
+async function runDmModmail(interaction) {
+    const sub = interaction.options.getSubcommand();
+    const open = await openTickets(interaction.user.id);
+    if (sub === 'open') {
+        const prompt = await openPrompt(interaction.user);
+        if (!prompt) return interaction.reply({ ...cardPayload(open.length ? 'you already have a ticket open with every server you share with okite that takes modmail.' : 'none of the servers you share with okite take modmail.'), flags: V2_FLAG | MessageFlags.Ephemeral });
+        return interaction.reply({ ...prompt, flags: V2_FLAG | MessageFlags.Ephemeral });
+    }
+    if (!open.length) return interaction.reply({ ...cardPayload('you have no open tickets. send a message or use /modmail open to start one.'), flags: V2_FLAG | MessageFlags.Ephemeral });
+    if (sub === 'close') return interaction.reply({ ...closePrompt(open), flags: V2_FLAG | MessageFlags.Ephemeral });
+    if (open.length < 2) return interaction.reply({ ...cardPayload(`you only have one open ticket, with ${plainText(guildLabel(open[0].guildId))}.`), flags: V2_FLAG | MessageFlags.Ephemeral });
+    return interaction.reply({ ...switchPrompt(open), flags: V2_FLAG | MessageFlags.Ephemeral });
+}
+
+function modmailReplyModal(ticketId, asServer) {
+    return new ModalBuilder().setCustomId(`mmreplymodal:${ticketId}:${asServer ? 1 : 0}`).setTitle(asServer ? 'Reply as server' : 'Reply')
+        .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('text').setLabel('Message').setStyle(TextInputStyle.Paragraph).setMaxLength(1900).setRequired(true)));
+}
+
+async function handleModmailComponent(interaction) {
+    const [step, a, b] = interaction.customId.split(':');
+
+    if (['mmopen', 'mmopenpick', 'mmcancel', 'mmcloseask', 'mmcloseyes', 'mmswitch'].includes(step)) {
+        if (step === 'mmcancel') return interaction.update(cardPayload('okay, nothing changed.'));
+        if (step === 'mmopen' || step === 'mmopenpick') return startMemberTicket(interaction, step === 'mmopen' ? a : interaction.values[0]);
+        const ticket = await ticketStore.get(step === 'mmcloseyes' ? a : interaction.values[0]);
+        if (!ticket || ticket.userId !== interaction.user.id || ticket.status !== 'open') return interaction.update(cardPayload('that ticket is already closed.'));
+        const name = plainText(guildLabel(ticket.guildId));
+        if (step === 'mmcloseask') return interaction.update(closePrompt([ticket]));
+        if (step === 'mmswitch') {
+            await ticketStore.update(ticket._id, { activeAt: new Date() });
+            return interaction.update(cardPayload(`now talking to ${name}. your messages will be routed there until you switch again.`));
+        }
+        const guild = client.guilds.cache.get(ticket.guildId);
+        await interaction.update(cardPayload('closing…'));
+        if (guild) await closeTicket({ ticket, guild, by: interaction.user, reason: null, silent: true, byMember: true });
+        const left = await openTickets(interaction.user.id);
+        return interaction.editReply(cardPayload(`you closed your ticket with ${name}.`, [], left.length ? `you're now talking to ${plainText(guildLabel(left[0].guildId))}.` : 'text okite again anytime to open a new one.'));
+    }
+
+    if (!interaction.guild) return interaction.reply({ content: 'this only works in a server.', ephemeral: true });
+    const perms = interaction.memberPermissions;
+    if (!(perms?.has(PermissionFlagsBits.ManageMessages) || perms?.has(PermissionFlagsBits.Administrator))) {
+        return interaction.reply({ content: 'you need Manage Messages to handle modmail.', ephemeral: true });
+    }
+    const ticket = await ticketStore.get(a);
+    if (!ticket || ticket.guildId !== interaction.guildId) return interaction.reply({ content: 'that ticket no longer exists.', ephemeral: true });
+    if (ticket.status !== 'open') return interaction.reply({ content: 'that ticket is already closed.', ephemeral: true });
+
+    if (step === 'mmreply') return interaction.showModal(modmailReplyModal(ticket._id, b === '1'));
+    if (step === 'mmreplymodal') {
+        await interaction.deferReply({ ephemeral: true });
+        const result = await modWrites({ ticket, guild: interaction.guild, mod: interaction.user, text: interaction.fields.getTextInputValue('text'), attachments: [], asServer: b === '1' });
+        return interaction.editReply(result.error || 'sent.');
+    }
+    if (step === 'mmclaim') {
+        const claimedBy = ticket.claimedBy ? null : interaction.user.id;
+        await ticketStore.update(ticket._id, { claimedBy, thread: { id: null, parts: [] } });
+        ticket.claimedBy = claimedBy;
+        await interaction.deferUpdate();
+        await refreshTicketHeader(ticket);
+        const thread = await ticketThread(ticket);
+        if (thread) await thread.send(cardPayload(`-# ${await withPicture(userEmoji(interaction.user), userName(interaction.user))} ${claimedBy ? 'claimed' : 'unclaimed'} the ticket`)).catch(() => null);
+        return null;
+    }
+    if (step === 'mmclose') {
+        return interaction.showModal(new ModalBuilder().setCustomId(`mmclosemodal:${ticket._id}`).setTitle('Close ticket').addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Reason (sent to the user)').setStyle(TextInputStyle.Paragraph).setMaxLength(900).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('silent').setLabel('Close silently? type yes to skip the DM').setStyle(TextInputStyle.Short).setMaxLength(3).setRequired(false))
+        ));
+    }
+    if (step === 'mmclosemodal') {
+        await interaction.deferReply({ ephemeral: true });
+        const reason = interaction.fields.getTextInputValue('reason')?.trim() || null;
+        const silent = /^y/i.test(interaction.fields.getTextInputValue('silent') || '');
+        const dm = await closeTicket({ ticket, guild: interaction.guild, by: interaction.user, reason, silent });
+        return interaction.editReply(`closed.${dm === 'failed' ? ' could not DM them the close note.' : ''}`);
+    }
+    return null;
+}
+
+const describeModmail = (m) => (m.enabled && m.channelId
+    ? [
+        `modmail is on. tickets go to <#${m.channelId}>.`,
+        `\`-\` replies go out ${m.asServer ? 'as the server' : 'with the mod\'s name'} by default`,
+        `\`-\` new tickets ${m.ping ? 'ping the mod role (see `modrole`)' : 'do not ping anyone'}`,
+        `\`-\` greeting: ${m.greeting ? `\n${quoteBlock(clip(m.greeting, 500))}` : 'none'}`,
+        `\`-\` close message: ${m.closeMessage ? `\n${quoteBlock(clip(m.closeMessage, 500))}` : 'none'}`,
+        `\`-\` blocked: ${m.blocked.length ? m.blocked.slice(0, 20).map(id => `<@${id}>`).join(', ') : 'nobody'}`
+    ].join('\n')
+    : 'modmail is off. turn it on with `/modmail setup channel:#channel`.');
+
+async function runModmailCommand(interaction, { isMod, isManager }) {
+    const { options, guild } = interaction;
+    const sub = options.getSubcommand();
+    const settings = (await getExtras(guild.id)).modmail;
+    const managerOnly = ['setup', 'off', 'greeting', 'closing', 'block', 'unblock'];
+    if (managerOnly.includes(sub) && !isManager) return interaction.reply({ content: 'you need **Manage Channels** to change modmail.', ephemeral: true });
+    if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use modmail.', ephemeral: true });
+
+    if (sub === 'settings') return interaction.reply({ content: describeModmail(settings), ephemeral: true, allowedMentions: { parse: [] } });
+
+    if (managerOnly.includes(sub)) {
+        const update = {};
+        if (sub === 'setup') {
+            const channel = options.getChannel('channel');
+            const okType = channel && (channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildForum);
+            if (!okType) return interaction.reply({ content: 'modmail needs a text or forum channel. a private mod-only one works best.', ephemeral: true });
+            const need = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.ManageThreads];
+            const missing = channel.permissionsFor(guild.members.me)?.missing(need) ?? need;
+            if (missing.length) return interaction.reply({ content: `okite is missing ${missing.map(p => String(p).replace(/([a-z])([A-Z])/g, '$1 $2')).join(', ')} in <#${channel.id}>.`, ephemeral: true });
+            update.modmailEnabled = true;
+            update.modmailChannelId = channel.id;
+            const asServer = options.getBoolean('as_server');
+            const ping = options.getBoolean('ping');
+            if (asServer !== null && asServer !== undefined) update.modmailAsServer = asServer;
+            if (ping !== null && ping !== undefined) update.modmailPing = ping;
+        } else if (sub === 'off') {
+            update.modmailEnabled = false;
+        } else if (sub === 'greeting' || sub === 'closing') {
+            const text = (options.getString('text') || '').trim();
+            const value = !text || /^(reset|none|off)$/i.test(text) ? null : clip(text, 1500);
+            update[sub === 'greeting' ? 'modmailGreeting' : 'modmailCloseMessage'] = value;
+        } else {
+            const user = options.getUser('user');
+            if (!user) return interaction.reply({ content: 'pick a user.', ephemeral: true });
+            const list = new Set(settings.blocked);
+            if (sub === 'block') list.add(user.id);
+            else list.delete(user.id);
+            update.modmailBlocked = [...list];
+            if (sub === 'block') {
+                const open = await ticketStore.findOne({ guildId: guild.id, userId: user.id, status: 'open' });
+                if (open) await closeTicket({ ticket: open, guild, by: interaction.user, reason: 'blocked from modmail', silent: true });
+            }
+        }
+        await setExtras(guild.id, update);
+        const now = (await getExtras(guild.id)).modmail;
+        logInBackground(guild, {
+            title: 'modmail changed',
+            kind: 'server',
+            fields: [
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'change', value: sub, inline: true },
+                { name: 'now', value: now.enabled && now.channelId ? `on / <#${now.channelId}>` : 'off', inline: true }
+            ]
+        });
+        return interaction.reply({ content: describeModmail(now), ephemeral: true, allowedMentions: { parse: [] } });
+    }
+
+    const files = RELAY_FILE_SLOTS.map(n => options.getAttachment?.(n)).filter(Boolean);
+    const asServerOption = options.getBoolean('as_server');
+    const asServer = asServerOption === null || asServerOption === undefined ? settings.asServer : asServerOption;
+    const done = async (content) => {
+        if (interaction.sourceMessage) {
+            if (content === 'sent.') return interaction.sourceMessage.delete().catch(() => null);
+            return interaction.reply(content);
+        }
+        return interaction.editReply(content);
+    };
+
+    if (sub === 'open') {
+        if (!settings.enabled || !settings.channelId) return interaction.reply({ content: 'modmail is off. set it up with `/modmail setup` first.', ephemeral: true });
+        const user = options.getUser('user');
+        const text = (options.getString('message') || '').trim();
+        if (!user || user.bot) return interaction.reply({ content: 'pick a user who is not a bot.', ephemeral: true });
+        if (!interaction.sourceMessage) await interaction.deferReply({ ephemeral: true });
+        const current = await ticketStore.findOne({ guildId: guild.id, userId: user.id, status: 'open' });
+        const opened = current ? { ticket: current, thread: await ticketThread(current) } : await openTicket(guild, user, interaction.user.id);
+        if (opened.error) return done(`could not open the ticket: ${opened.error}.`);
+        const result = await modWrites({ ticket: opened.ticket, guild, mod: interaction.user, text, attachments: files, asServer, footer: current ? null : 'reply here to answer. okite routes it to the mods.' });
+        if (result.error && !current) {
+            await ticketStore.remove(opened.ticket._id);
+            await opened.thread?.delete?.().catch(() => null);
+            if (opened.ticket.headerId && opened.ticket.channelId !== opened.ticket.threadId) {
+                const channel = guild.channels.cache.get(opened.ticket.channelId);
+                await channel?.messages?.delete?.(opened.ticket.headerId).catch(() => null);
+            }
+        }
+        if (result.error) return done(result.error);
+        if (!current) await ticketStore.update(opened.ticket._id, { activeAt: new Date() });
+        return done(`sent. the ticket is <#${opened.thread?.id ?? opened.ticket.threadId}>.`);
+    }
+
+    const ticket = await ticketFromThread(interaction.channelId);
+    if (!ticket) return interaction.reply({ content: 'this only works inside an open modmail ticket thread.', ephemeral: true });
+
+    if (sub === 'reply') {
+        const text = (options.getString('message') || '').trim();
+        if (!interaction.sourceMessage) await interaction.deferReply({ ephemeral: true });
+        const result = await modWrites({ ticket, guild, mod: interaction.user, text, attachments: files, asServer });
+        return done(result.error || 'sent.');
+    }
+
+    if (sub === 'close') {
+        if (!interaction.sourceMessage) await interaction.deferReply({ ephemeral: true });
+        const reason = (options.getString('reason') || '').trim() || null;
+        const dm = await closeTicket({ ticket, guild, by: interaction.user, reason, silent: options.getBoolean('silent') ?? false });
+        if (interaction.sourceMessage) return interaction.sourceMessage.delete().catch(() => null);
+        return interaction.editReply(`closed.${dm === 'failed' ? ' could not DM them the close note.' : ''}`).catch(() => null);
+    }
+    return null;
+}
+
+async function runExtraCommand(interaction, { isMod, isManager }) {
+    if (interaction.commandName === 'modmail') return runModmailCommand(interaction, { isMod, isManager });
+    return null;
+}
+
+const EXTRA_COMMANDS = ['modmail'];
+
 client.on(Events.MessageCreate, safe(async (message) => {
-    if (!message.guild || message.author?.bot) return;
+    if (!message.guild) {
+        if (!message.author?.bot && message.author?.id !== client.user.id) await handleModmailDm(message);
+        return;
+    }
+    if (message.author?.bot) return;
     if (await messageLogsOn(message.guildId)) {
         indexMessage(message);
         cacheMessage(message);

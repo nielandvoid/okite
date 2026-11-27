@@ -1,4 +1,5 @@
 const { REST, Routes, ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js"); require("dotenv").config(); const help = require("./help");
+const { guildModmail, dmModmail } = require("./modmail-commands");
 
 const commands = [
     new ContextMenuCommandBuilder()
@@ -407,6 +408,7 @@ const commands = [
         ),
 ];
 
+
 const rest = new REST({version: "10"}).setToken(process.env.DISCORD_TOKEN);
 
 
@@ -416,9 +418,15 @@ const rest = new REST({version: "10"}).setToken(process.env.DISCORD_TOKEN);
 
     await rest.put(
       Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands }
+      { body: [...commands, dmModmail()] }
     );
     console.log('successfully registered all context-menu commands.');
+    const guilds = await rest.get(Routes.userGuilds());
+    for (const guild of guilds) {
+      await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guild.id), { body: [guildModmail()] })
+        .then(() => console.log(`registered /modmail in ${guild.name}`))
+        .catch(err => console.error(`could not register /modmail in ${guild.name}:`, err.message));
+    }
   } catch (error) {
     console.error('error registering commands:', error);
   }

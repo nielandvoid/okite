@@ -35,6 +35,24 @@ module.exports = {
         desc: 'sets a member\'s server nickname. with no nickname it changes nothing. `reset` clears it. the user can be a mention, an id, or a name okite will confirm. reply to their message to skip <user>. alias: `nick`.',
         perm: 'Manage Nicknames'
     },
+    modmail: {
+        summary: 'remote tickets: members talk to the mods through okite\'s DMs',
+        syntax: 'modmail\nmodmail setup #channel [server] [noping]\nmodmail off\nmodmail greeting <text|reset>\nmodmail closing <text|reset>\nmodmail block|unblock @user\nmodmail open @user <message>',
+        desc: 'a member DMs okite (or uses `/modmail open` there), picks the server, and a remote-ticket opens. their first message only brings up that prompt. after that, everything they send goes to a ticket thread in the modmail channel, where a card shows who they are, and their infractions.\nin the thread, the member\'s messages and your replies build up in one card per round. `reply` answers them (`sreply` sends it as the server), and plain messages stay between mods. the member sees nothing while they type. each reply sends them one card with what they wrote and your answer, and a second reply before they write again replaces that card.\nmembers end a ticket by typing `close` or with `/modmail close`, and pick which server they are talking to with `/modmail switch`. you end it with `close`. closing locks the thread and logs a transcript. alias: `mm`.',
+        perm: 'Manage Messages (setup: Manage Channels)'
+    },
+    reply: {
+        summary: 'answer a modmail ticket',
+        syntax: 'reply <message>\nsreply <message>',
+        desc: 'sends your message to the user of the modmail ticket you are in, with any files attached. `sreply` sends it as the server, with the server\'s name and icon instead of yours. aliases: `r`, `sr`.',
+        perm: 'Manage Messages'
+    },
+    close: {
+        summary: 'close a modmail ticket',
+        syntax: 'close [reason] [--silent]',
+        desc: 'closes the modmail ticket you are in. the user gets the reason by DM unless you add `--silent`. the thread is locked and a transcript goes to the log.',
+        perm: 'Manage Messages'
+    },
     slowmode: {
         summary: 'set or revert a channel\'s slowmode',
         syntax: 'slowmode <time> [#channel]\nslowmode revert [#channel]',

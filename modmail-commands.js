@@ -1,0 +1,47 @@
+const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, InteractionContextType, ApplicationIntegrationType } = require("discord.js");
+const help = require("./help");
+
+const guildModmail = () => new SlashCommandBuilder()
+    .setName("modmail")
+    .setDescription(help.modmail.summary)
+    .setContexts(InteractionContextType.Guild)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .addSubcommand(sub => sub.setName("setup").setDescription("turn modmail on and pick where tickets go")
+        .addChannelOption(o => o.setName("channel").setDescription("a mod-only text or forum channel").addChannelTypes(ChannelType.GuildText, ChannelType.GuildForum).setRequired(true))
+        .addBooleanOption(o => o.setName("as_server").setDescription("send replies as the server by default, without the mod's name"))
+        .addBooleanOption(o => o.setName("ping").setDescription("ping the mod role on new tickets (default on)")))
+    .addSubcommand(sub => sub.setName("off").setDescription("stop taking new tickets"))
+    .addSubcommand(sub => sub.setName("settings").setDescription("show the modmail settings"))
+    .addSubcommand(sub => sub.setName("greeting").setDescription("a note users get when they open a ticket")
+        .addStringOption(o => o.setName("text").setDescription("the note, or reset").setRequired(true).setMaxLength(1500)))
+    .addSubcommand(sub => sub.setName("closing").setDescription("a note added to the close message")
+        .addStringOption(o => o.setName("text").setDescription("the note, or reset").setRequired(true).setMaxLength(1500)))
+    .addSubcommand(sub => sub.setName("block").setDescription("stop someone from opening tickets")
+        .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true)))
+    .addSubcommand(sub => sub.setName("unblock").setDescription("let someone open tickets again")
+        .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true)))
+    .addSubcommand(sub => sub.setName("open").setDescription("DM a member and open a ticket with them")
+        .addUserOption(o => o.setName("user").setDescription("the member").setRequired(true))
+        .addStringOption(o => o.setName("message").setDescription("what to send them").setRequired(true).setMaxLength(3500))
+        .addBooleanOption(o => o.setName("as_server").setDescription("send it as the server instead of you"))
+        .addAttachmentOption(o => o.setName("file").setDescription("a file to send")))
+    .addSubcommand(sub => sub.setName("reply").setDescription("reply in this ticket")
+        .addStringOption(o => o.setName("message").setDescription("what to send them").setMaxLength(3500))
+        .addBooleanOption(o => o.setName("as_server").setDescription("send it as the server instead of you"))
+        .addAttachmentOption(o => o.setName("file").setDescription("a file to send"))
+        .addAttachmentOption(o => o.setName("file2").setDescription("another file"))
+        .addAttachmentOption(o => o.setName("file3").setDescription("another file")))
+    .addSubcommand(sub => sub.setName("close").setDescription("close this ticket")
+        .addStringOption(o => o.setName("reason").setDescription("sent to the user").setMaxLength(900))
+        .addBooleanOption(o => o.setName("silent").setDescription("close without DMing them")));
+
+const dmModmail = () => new SlashCommandBuilder()
+    .setName("modmail")
+    .setDescription("open, close or switch your remote tickets with a server's mods")
+    .setContexts(InteractionContextType.BotDM)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
+    .addSubcommand(sub => sub.setName("open").setDescription("open a ticket with a server's mods"))
+    .addSubcommand(sub => sub.setName("close").setDescription("close one of your tickets"))
+    .addSubcommand(sub => sub.setName("switch").setDescription("pick which server your messages go to"));
+
+module.exports = { guildModmail, dmModmail };
