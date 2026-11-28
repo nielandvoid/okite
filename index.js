@@ -2012,7 +2012,7 @@ async function urgentPurge(guild, userId, days, banned) {
                 const batch = await c.channel.messages.fetch({ limit: 100, ...(c.before ? { before: c.before } : {}) }).catch(() => null);
                 if (!batch?.size) { c.done = true; continue; }
                 const mine = [...batch.values()].filter(m => m.author.id === userId && m.createdTimestamp >= since).map(m => m.id);
-                if (mine.length) removed += await eraseMessages(c.channel, mine);
+                if (mine.length) { const n = await eraseMessages(c.channel, mine); removed += n; }
                 const oldest = batch.last();
                 if (oldest.createdTimestamp < since) c.done = true; else c.before = oldest.id;
             }
@@ -4527,6 +4527,7 @@ async function runCountPurge(interaction, { count, users = [], beforeId, extraMe
 const userPurgeRuns = new Set();
 const USER_PURGE_TRANSCRIPT_BYTES = 3 * 1024 * 1024;
 const USER_PURGE_WORKERS = 4;
+const USER_PURGE_BACKLOG = 5000;
 const INTERACTION_LIFETIME_MS = 14 * 60 * 1000;
 
 async function purgeableChannels(guild) {
@@ -4562,11 +4563,12 @@ async function deleteUserMessages(channel, messages, state) {
     const recent = messages.filter(m => m.createdTimestamp > edge);
     const old = messages.filter(m => m.createdTimestamp <= edge);
     const gone = (promise) => promise.then(() => 1).catch(() => { state.errors++; return 0; });
-    if (recent.length > 1) state.deleted += await channel.bulkDelete(recent.map(m => m.id), true).then(done => done.size).catch(() => { state.errors++; return 0; });
-    else for (const m of recent) state.deleted += await gone(m.delete());
+    const count = (n) => { state.deleted += n; };
+    if (recent.length > 1) count(await channel.bulkDelete(recent.map(m => m.id), true).then(done => done.size).catch(() => { state.errors++; return 0; }));
+    else for (const m of recent) count(await gone(m.delete()));
     for (const m of old) {
         if (state.cancelled) break;
-        state.deleted += await gone(m.delete());
+        count(await gone(m.delete()));
     }
 }
 
@@ -4647,21 +4649,39 @@ async function runUserPurge(interaction, target) {
         let skipped = 0;
         let done = 0;
         let searching = true;
+        let searchDone = false;
+        let handedOff = false;
         ticker = setInterval(() => {
-            if (state.cancelled || Date.now() - started > INTERACTION_LIFETIME_MS) return;
+            if (state.cancelled || handedOff) return;
+            if (Date.now() - started > INTERACTION_LIFETIME_MS) {
+                handedOff = true;
+                interaction.editReply({ content: `still purging **${target.username}**: deleted ${state.deleted.toLocaleString()} of ${state.scanned.toLocaleString()} found so far. discord stops okite from updating this message soon, so the result will be in the purge log when it ends.`, components: [] }).catch(() => null);
+                return;
+            }
             const progress = searching
-                ? `found ${state.scanned.toLocaleString()} messages so far`
+                ? `found ${state.scanned.toLocaleString()} messages${searchDone ? '' : ' so far'}`
                 : `scanned ${state.scanned.toLocaleString()} messages, ${done}/${channels.length} channels done`;
-            interaction.editReply({ content: `purging **${target.username}**: ${progress}, deleted ${state.deleted.toLocaleString()}.`, components: [stopRow] }).catch(() => null);
+            const slow = searchDone && state.deleted < state.scanned ? ' messages over 14 days old are deleted one at a time, so the rest is slower.' : '';
+            interaction.editReply({ content: `purging **${target.username}**: ${progress}, deleted ${state.deleted.toLocaleString()}.${slow}`, components: [stopRow] }).catch(() => null);
         }, 5000);
 
+        const queues = new Map();
+        let pending = 0;
         const searched = await searchUserMessages(guild, target.id, {
             shouldStop: () => state.cancelled,
             onPage: async (channel, found) => {
                 state.scanned += found.length;
-                await eraseUserMessages(channel, found, state);
+                pending += found.length;
+                const chain = (queues.get(channel.id) || Promise.resolve())
+                    .then(() => (state.cancelled ? null : eraseUserMessages(channel, found, state)))
+                    .catch(err => { state.errors++; console.error('user purge delete error:', err.message); })
+                    .finally(() => { pending -= found.length; });
+                queues.set(channel.id, chain);
+                while (pending > USER_PURGE_BACKLOG && !state.cancelled) await new Promise(resolve => setTimeout(resolve, 1000));
             }
         });
+        searchDone = true;
+        await Promise.all(queues.values());
         searching = false;
         if (!searched.ok) {
             console.error('user purge search failed, scanning channels instead:', searched.error);
