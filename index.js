@@ -69,6 +69,8 @@ const mongoose = require('mongoose');
 const Guild = require('./models/guild');
 const Appeal = require('./models/appeal');
 const Ticket = require('./models/ticket');
+const Note = require('./models/note');
+const TempRole = require('./models/temprole');
 const { auditGuild, reportText } = require('./audit');
 const { guildModmail } = require('./modmail-commands');
 
@@ -1278,7 +1280,7 @@ async function deleteGuildData(guildId) {
     await supabase.from('bot_state').delete().eq('key', `case_floor:${guildId}`);
     if (process.env.MONGODB_URI) {
         await Guild.deleteOne({ guildId });
-        await Promise.all([Appeal.deleteMany({ guildId }), Ticket.deleteMany({ guildId })]);
+        await Promise.all([Appeal.deleteMany({ guildId }), Ticket.deleteMany({ guildId }), Note.deleteMany({ guildId }), TempRole.deleteMany({ guildId })]);
     }
     guildConfigCache.delete(guildId);
 }
@@ -2905,6 +2907,8 @@ async function handleInteraction(interaction) {
     const isMod = perms && (perms.has(PermissionFlagsBits.ManageMessages) || perms.has(PermissionFlagsBits.Administrator));
     const isManager = perms && (perms.has(PermissionFlagsBits.ManageChannels) || perms.has(PermissionFlagsBits.Administrator));
 
+    if (interaction.isButton?.() && interaction.customId.startsWith('rolespage:')) return interaction.update(await renderRoles(interaction.guild, Number(interaction.customId.split(':')[1]) || 0));
+
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId } = interaction;
 
@@ -3153,6 +3157,71 @@ async function handleInteraction(interaction) {
                 ]
             });
             return interaction.reply({ content: describeExtras.modRole(roleId), ephemeral: true, allowedMentions: { parse: [] } });
+        }
+
+        if (commandName === 'role') {
+            if (!perms?.has(PermissionFlagsBits.ManageRoles) && !perms?.has(PermissionFlagsBits.Administrator)) {
+                return interaction.reply({ content: 'you need **Manage Roles** to use this command.', ephemeral: true });
+            }
+            const sub = options.getSubcommand();
+            const guild = interaction.guild;
+            const me = guild.members.me;
+            if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) return interaction.reply({ content: 'okite needs **Manage Roles** for this.', ephemeral: true });
+            const isOwner = guild.ownerId === interaction.user.id;
+            const auditReason = (text) => clip(`by ${interaction.user.tag ?? interaction.user.username} (${interaction.user.id})${text ? `: ${text}` : ''}`, 500);
+
+            if (sub === 'create') {
+                const name = (options.getString('name') || '').trim();
+                if (!name || name.length > 100) return interaction.reply({ content: 'a role name is 1 to 100 characters.', ephemeral: true });
+                const colorInput = (options.getString('color') || '').trim().replace(/^#/, '');
+                if (colorInput && !/^[0-9a-f]{6}$/i.test(colorInput)) return interaction.reply({ content: 'the color is a hex code like `#7ee8a8`.', ephemeral: true });
+                const role = await guild.roles.create({
+                    name,
+                    color: colorInput ? parseInt(colorInput, 16) : undefined,
+                    hoist: options.getBoolean('hoist') ?? false,
+                    mentionable: options.getBoolean('mentionable') ?? false,
+                    permissions: [],
+                    reason: auditReason()
+                });
+                return interaction.reply({ content: `created <@&${role.id}>. it has no permissions and sits at the bottom of the role list.`, ephemeral: true, allowedMentions: { parse: [] } });
+            }
+
+            const picked = options.getRole?.('role') ?? options.getString?.('role') ?? null;
+            const role = typeof picked === 'string' ? guild.roles.cache.get(picked) : picked;
+            const target = options.getUser('user');
+            if (!role || !target) return interaction.reply({ content: 'pick a user and a role.', ephemeral: true });
+            if (role.id === guild.id) return interaction.reply({ content: 'everyone has @everyone, it can\'t be given or taken.', ephemeral: true });
+            if (role.managed) return interaction.reply({ content: `<@&${role.id}> belongs to a bot or integration, so it can't be given or taken by hand.`, ephemeral: true, allowedMentions: { parse: [] } });
+            if (me.roles.highest.comparePositionTo(role) <= 0) return interaction.reply({ content: `<@&${role.id}> is at or above okite's top role, so okite can't manage it. move okite's role higher first.`, ephemeral: true, allowedMentions: { parse: [] } });
+            if (!isOwner && interaction.member.roles.highest.comparePositionTo(role) <= 0) return interaction.reply({ content: `<@&${role.id}> is as high as your top role or higher.`, ephemeral: true, allowedMentions: { parse: [] } });
+            const lacking = perms.missing(role.permissions);
+            if (!isOwner && !perms.has(PermissionFlagsBits.Administrator) && lacking.length) {
+                return interaction.reply({ content: `<@&${role.id}> has permissions you don't have (${lacking.slice(0, 4).map(p => p.replace(/([a-z])([A-Z])/g, '$1 $2')).join(', ')}), so you can't hand it out.`, ephemeral: true, allowedMentions: { parse: [] } });
+            }
+            const member = await guild.members.fetch(target.id).catch(() => null);
+            if (!member) return interaction.reply({ content: 'that user isn\'t in this server.', ephemeral: true });
+            if (!isOwner && member.id !== interaction.user.id && (member.id === guild.ownerId || interaction.member.roles.highest.comparePositionTo(member.roles.highest) <= 0)) {
+                return interaction.reply({ content: `<@${member.id}> is as high as you or higher, so you can't change their roles.`, ephemeral: true, allowedMentions: { parse: [] } });
+            }
+            const has = member.roles.cache.has(role.id);
+            const reason = options.getString('reason') || null;
+            const timed = await tempRoleStore.find({ guildId, userId: member.id, roleId: role.id }).catch(() => []);
+            if (sub === 'add') {
+                const durationInput = options.getString('duration');
+                const length = durationInput ? parseDuration(durationInput) : null;
+                if (durationInput && (!length || length.permanent || length.ms < 60_000)) return interaction.reply({ content: 'the duration is at least a minute, like `1h`, `7d` or `2w`.', ephemeral: true });
+                if (has && !length) return interaction.reply({ content: `<@${member.id}> already has <@&${role.id}>.`, ephemeral: true, allowedMentions: { parse: [] } });
+                if (!has) await member.roles.add(role, auditReason(length ? `${reason ? `${reason} ` : ''}(for ${length.label})` : reason));
+                for (const row of timed) await tempRoleStore.remove(row._id);
+                if (!length) return interaction.reply({ content: `gave <@&${role.id}> to <@${member.id}>.`, ephemeral: true, allowedMentions: { parse: [] } });
+                const expiresAt = new Date(Date.now() + length.ms);
+                await tempRoleStore.create({ guildId, userId: member.id, roleId: role.id, addedBy: interaction.user.id, duration: length.label, expiresAt });
+                return interaction.reply({ content: `${has ? 'they already had' : 'gave'} <@&${role.id}>${has ? '' : ` to <@${member.id}>`}. okite takes it away <t:${Math.floor(expiresAt.getTime() / 1000)}:R>.`, ephemeral: true, allowedMentions: { parse: [] } });
+            }
+            if (!has) return interaction.reply({ content: `<@${member.id}> doesn't have <@&${role.id}>.`, ephemeral: true, allowedMentions: { parse: [] } });
+            for (const row of timed) await tempRoleStore.remove(row._id);
+            await member.roles.remove(role, auditReason(reason));
+            return interaction.reply({ content: `took <@&${role.id}> from <@${member.id}>.`, ephemeral: true, allowedMentions: { parse: [] } });
         }
 
         if (commandName === 'appeals') {
@@ -3684,7 +3753,7 @@ async function handleInteraction(interaction) {
                 return interaction.editReply('you can\'t ban that user.');
             }
             const [resolved, member, alreadyBanned] = await Promise.all([
-                resolveRuleFields(guildId, options.getString('rule'), options.getString('reason') || 'no reason given'),
+                resolveRuleFields(guildId, options.getString('rule'), options.getString('reason') || (options.getString('rule') ? null : 'no reason given')),
                 interaction.guild.members.fetch(target.id).catch(() => null),
                 banOf(interaction.guild, target.id)
             ]);
@@ -3754,6 +3823,7 @@ async function handleInteraction(interaction) {
                 fields: [
                     { name: 'user', value: who(target), inline: true },
                     { name: 'moderator', value: who(interaction.user), inline: true },
+                    { name: 'rule', value: resolved.ruleId ? `\`${resolved.ruleId}\`` : 'custom', inline: true },
                     { name: 'reason', value: reason },
                     { name: 'mod note', value: options.getString('modnote') ?? '' },
                     { name: 'duration', value: banDuration ? banDuration.label : 'Permanent', inline: true },
@@ -4673,7 +4743,7 @@ function fuzzyMatch(input, words) {
 const COMMAND_WORDS = {
     help: 'help', ping: 'ping', cite: 'cite', lookup: 'cite', purge: 'purge', ban: 'ban', lock: 'lock', unlock: 'unlock',
     kick: 'kick', softban: 'softban', mute: 'mute', m: 'mute', timeout: 'mute', unmute: 'unmute', untimeout: 'unmute', unban: 'unban', pardon: 'unban', setnick: 'setnick', nick: 'setnick', slowmode: 'slowmode', slow: 'slowmode', sendmessage: 'sendmessage', say: 'sendmessage',
-    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', perms: 'perms', modmail: 'modmail', mm: 'modmail', reply: 'reply', r: 'reply', sreply: 'sreply', sr: 'sreply', areply: 'sreply', ar: 'sreply', modreply: 'modreply', mr: 'modreply', close: 'close', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
+    userdms: 'userdms', dms: 'userdms', watchdog: 'watchdog', honeypot: 'honeypot', appeals: 'appeals', appeal: 'appeals', modrole: 'modrole', perms: 'perms', role: 'role', roles: 'roles', modmail: 'modmail', mm: 'modmail', reply: 'reply', r: 'reply', sreply: 'sreply', sr: 'sreply', areply: 'sreply', ar: 'sreply', modreply: 'modreply', mr: 'modreply', close: 'close', serverinfo: 'serverinfo', si: 'serverinfo', server: 'serverinfo', guildinfo: 'serverinfo', whois: 'whois', userinfo: 'whois', ui: 'whois', note: 'note', notes: 'note', modstats: 'modstats', voice: 'voice', move: 'voice', joingate: 'joingate', gate: 'joingate', lockdown: 'lockdown', setlog: 'setlog', logchannels: 'logchannels', prefix: 'prefix', autopurge: 'autopurge', autocorrect: 'autocorrect', requirerule: 'requirerule', messagelogs: 'messagelogs', bancleanup: 'bancleanup', timezone: 'timezone', tz: 'timezone',
     audit: 'security-audit', securityaudit: 'security-audit', 'security-audit': 'security-audit', obliterate: 'obliterate',
     rule: 'rule', rules: 'rule', infraction: 'infraction', infractions: 'infraction', inf: 'infraction', history: 'history',
     alias: 'alias', aliases: 'alias'
@@ -4714,11 +4784,11 @@ const defaultPrefix = () => config.prefix || process.env.PREFIX || '!';
 const prefixCache = new Map();
 
 const HELP_GROUPS = [
-    ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'setnick', 'slowmode', 'sendmessage']],
-    ['members', ['modmail', 'reply', 'close']],
+    ['moderation', ['ban', 'unban', 'kick', 'softban', 'mute', 'unmute', 'purge', 'obliterate', 'cite', 'lock', 'unlock', 'lockdown', 'setnick', 'role', 'slowmode', 'voice', 'sendmessage']],
+    ['members', ['whois', 'note', 'modmail', 'reply', 'close', 'modstats']],
     ['infractions', ['infraction', 'alias']],
-    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule', 'perms']],
-    ['utility', ['ping', 'help', 'security-audit']]
+    ['server', ['setlog', 'logchannels', 'prefix', 'autopurge', 'autocorrect', 'requirerule', 'messagelogs', 'userdms', 'watchdog', 'honeypot', 'joingate', 'appeals', 'modrole', 'bancleanup', 'timezone', 'rule', 'perms']],
+    ['utility', ['ping', 'help', 'serverinfo', 'roles', 'security-audit']]
 ];
 const COMMAND_HELP = require('./help');
 
@@ -5088,6 +5158,7 @@ async function pickRule(message, rules, typed) {
 }
 
 async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false) {
+    argText = argText.replace(/(^|\s)[\u2012-\u2015\u2212]+(?=[a-z])/gi, '$1--');
     const noteCapable = ['ban', 'kick', 'softban', 'mute', 'unmute', 'infraction'].includes(name);
     const mnMatch = noteCapable ? argText.match(/(^|\s)--(?:mn|modnote)(?:\s+([\s\S]*))?$/i) : null;
     const modNote = mnMatch ? (mnMatch[2] || '').trim() || null : null;
@@ -5136,7 +5207,13 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
             break;
         }
         values.urgent = values.urgent ?? false;
-        values.reason = restAfter(argText, i) || null;
+        let reason = restAfter(argText, i);
+        const ruleLater = !values.rule && name !== 'unban' && name !== 'unmute' ? reason.match(/(^|\s)--rule\s+(\S+)(?=\s|$)/i) : null;
+        if (ruleLater) {
+            values.rule = ruleLater[2];
+            reason = (reason.slice(0, ruleLater.index) + reason.slice(ruleLater.index + ruleLater[0].length)).replace(/\s+/g, ' ').trim();
+        }
+        values.reason = reason || null;
         return { commandName: name, subcommand, values };
     }
 
@@ -5262,6 +5339,125 @@ async function parsePrefixCommand(message, name, argText, PREFIX, fuzzy = false)
             return { commandName: 'modmail', subcommand: 'open', values };
         }
         return fail(syntax);
+    }
+
+    if (name === 'whois') {
+        const { user } = await takeUser(0);
+        values.user = user ?? message.author;
+        return { commandName: 'whois', subcommand, values };
+    }
+
+    if (name === 'note') {
+        const first = args[0]?.toLowerCase();
+        const syntax = `syntax: \`${PREFIX}note @user <text>\`, \`${PREFIX}note @user\` to list, or \`${PREFIX}note remove @user <number>\``;
+        if (['remove', 'rm', 'delete', 'del'].includes(first)) {
+            const user = await resolvePrefixUser(args[1]);
+            if (!user || !/^\d+$/.test(args[2] || '')) return fail(syntax);
+            values.user = user;
+            values.number = Number(args[2]);
+            return { commandName: 'note', subcommand: 'remove', values };
+        }
+        const at = ['list', 'ls', 'add'].includes(first) ? 1 : 0;
+        const user = await resolvePrefixUser(args[at]);
+        if (!user) return fail(syntax);
+        values.user = user;
+        const text = restAfter(argText, at + 1);
+        if (!text || first === 'list' || first === 'ls') return { commandName: 'note', subcommand: 'list', values };
+        values.text = text;
+        return { commandName: 'note', subcommand: 'add', values };
+    }
+
+    if (name === 'modstats') {
+        for (const word of args) {
+            const days = word.match(/^(\d{1,3})d?$/i);
+            if (days) values.days = Number(days[1]);
+            else {
+                const user = await resolvePrefixUser(word);
+                if (user) values.moderator = user;
+                else return fail(`syntax: \`${PREFIX}modstats [days] [@mod]\``);
+            }
+        }
+        return { commandName: 'modstats', subcommand, values };
+    }
+
+    if (name === 'roles') return { commandName: 'roles', subcommand, values };
+    if (name === 'serverinfo') return { commandName: 'serverinfo', subcommand, values };
+
+    if (name === 'voice') {
+        const rest = args[0]?.toLowerCase() === 'move' ? args.slice(1) : args;
+        const syntax = `syntax: \`${PREFIX}move #to-channel [@user | #from-channel]\` (no user or channel moves everyone in your voice channel)`;
+        const to = resolvePrefixChannel(message.guild, rest[0]);
+        if (!to) return fail(syntax);
+        values.to = to;
+        if (rest[1]) {
+            const from = resolvePrefixChannel(message.guild, rest[1]);
+            const user = from ? null : await resolvePrefixUser(rest[1]);
+            if (!from && !user) return fail(syntax);
+            if (from) values.from = from;
+            if (user) values.user = user;
+        }
+        return { commandName: 'voice', subcommand: 'move', values };
+    }
+
+    if (name === 'joingate') {
+        const first = args[0]?.toLowerCase();
+        const syntax = `syntax: \`${PREFIX}joingate\` to show, \`${PREFIX}joingate on|off\`, \`${PREFIX}joingate days <1-365>\`, \`${PREFIX}joingate action kick|mute|log\`, \`${PREFIX}joingate mute <duration>\`, \`${PREFIX}joingate noavatar on|off\` or \`${PREFIX}joingate allow|unallow @user\``;
+        if (!first || first === 'show') return { commandName: 'joingate', subcommand, values };
+        if (ON_OFF[first]) { values.enabled = ON_OFF[first] === 'on'; return { commandName: 'joingate', subcommand, values }; }
+        if (first === 'days' && /^\d+$/.test(args[1] || '')) { values.days = Number(args[1]); return { commandName: 'joingate', subcommand, values }; }
+        if (first === 'action' && ['kick', 'mute', 'log'].includes(args[1]?.toLowerCase())) { values.action = args[1].toLowerCase(); return { commandName: 'joingate', subcommand, values }; }
+        if (first === 'mute' && args[1]) { values.mute = args[1]; return { commandName: 'joingate', subcommand, values }; }
+        if (first === 'noavatar' && ON_OFF[args[1]?.toLowerCase()]) { values.noavatar = ON_OFF[args[1].toLowerCase()] === 'on'; return { commandName: 'joingate', subcommand, values }; }
+        if (first === 'allow' || first === 'unallow') {
+            const user = await resolvePrefixUser(args[1]);
+            if (!user) return fail(syntax);
+            values[first] = user;
+            return { commandName: 'joingate', subcommand, values };
+        }
+        return fail(syntax);
+    }
+
+    if (name === 'lockdown') {
+        const first = args[0]?.toLowerCase();
+        if (!first || first === 'status') return { commandName: 'lockdown', subcommand: 'status', values };
+        if (ON_OFF[first] === 'on') {
+            const quiet = /(^|\s)--quiet(?=\s|$)/i;
+            const rest = restAfter(argText, 1);
+            values.notice = !quiet.test(rest);
+            values.reason = rest.replace(quiet, '$1').trim() || null;
+            return { commandName: 'lockdown', subcommand: 'on', values };
+        }
+        if (ON_OFF[first] === 'off') return { commandName: 'lockdown', subcommand: 'off', values };
+        return fail(`syntax: \`${PREFIX}lockdown on [reason] [--quiet]\`, \`${PREFIX}lockdown off\` or \`${PREFIX}lockdown\` for the status`);
+    }
+
+    if (name === 'role') {
+        const first = args[0]?.toLowerCase();
+        const syntax = `syntax: \`${PREFIX}role add @user <role> [duration]\`, \`${PREFIX}role remove @user <role>\` or \`${PREFIX}role create <name> [#color]\``;
+        if (first === 'create' || first === 'new') {
+            const rest = args.slice(1);
+            if (/^#?[0-9a-f]{6}$/i.test(rest.at(-1) || '') && rest.length > 1) values.color = rest.pop();
+            if (!rest.length) return fail(syntax);
+            values.name = rest.join(' ');
+            return { commandName: 'role', subcommand: 'create', values };
+        }
+        const sub = ['add', 'give'].includes(first) ? 'add' : ['remove', 'rm', 'take'].includes(first) ? 'remove' : null;
+        if (!sub) return fail(syntax);
+        const user = await resolvePrefixUser(args[1]);
+        let roleText = args.slice(2).join(' ').trim();
+        const lastWord = args.length > 3 ? args.at(-1) : null;
+        const length = sub === 'add' && lastWord ? parseDuration(lastWord) : null;
+        if (length && !length.permanent) {
+            values.duration = lastWord;
+            roleText = args.slice(2, -1).join(' ').trim();
+        }
+        const roleId = roleText.match(/^<@&(\d+)>$/)?.[1]
+            || (/^\d{17,20}$/.test(roleText) ? roleText : null)
+            || message.guild.roles.cache.find(r => r.name.toLowerCase() === roleText.toLowerCase())?.id;
+        if (!user || !roleId || !message.guild.roles.cache.has(roleId)) return fail(syntax);
+        values.user = user;
+        values.role = roleId;
+        return { commandName: 'role', subcommand: sub, values };
     }
 
     if (name === 'perms') return { commandName: 'perms', subcommand, values };
@@ -5508,7 +5704,9 @@ function isReadOnlyCommand(commandName, subcommand, values = {}) {
     if (commandName === 'bancleanup') return values.enabled === undefined && !values.days;
     if (commandName === 'timezone') return !values.zone;
     if (commandName === 'perms') return true;
-    if (commandName === 'modmail') return ['settings', 'reply'].includes(subcommand);
+    if (['whois', 'roles', 'modstats', 'serverinfo'].includes(commandName)) return true;
+    if (commandName === 'note' || commandName === 'modmail' || commandName === 'lockdown') return ['list', 'settings', 'status', 'reply'].includes(subcommand);
+    if (commandName === 'joingate') return ['enabled', 'days', 'action', 'mute', 'noavatar', 'allow', 'unallow'].every(k => values[k] === undefined);
     return false;
 }
 
@@ -6175,6 +6373,7 @@ client.on(Events.GuildCreate, safe(async (guild) => {
 
 client.on(Events.GuildMemberAdd, safe(async (member) => {
     reapplyMutes(member).catch(err => console.error('mute reapply error:', err.message));
+    checkJoinGate(member).catch(err => console.error('join gate error:', err.message));
     const ageDays = Math.floor((Date.now() - member.user.createdTimestamp) / 86400000);
     await sendLog(member.guild, {
         title: 'member joined',
@@ -6228,7 +6427,9 @@ async function getExtras(guildId) {
         honeypot: { channelId: src.honeypotChannelId || null, action: src.honeypotAction || 'softban', invite: !!src.honeypotInvite },
         appeals: { enabled: !!src.appealsEnabled, channelId: src.appealsChannelId || null, questions: custom ? src.appealQuestions.map(q => ({ label: q.label, hint: q.hint || '' })) : [], custom, blocked: Array.isArray(src.appealBlocked) ? src.appealBlocked : [] },
         modRoleId: src.modRoleId || null,
-        modmail: { enabled: !!src.modmailEnabled, channelId: src.modmailChannelId || null, asServer: src.modmailAsServer !== false, ping: src.modmailPing !== false, greeting: src.modmailGreeting || null, closeMessage: src.modmailCloseMessage || null, blocked: Array.isArray(src.modmailBlocked) ? src.modmailBlocked : [] }
+        modmail: { enabled: !!src.modmailEnabled, channelId: src.modmailChannelId || null, asServer: src.modmailAsServer !== false, ping: src.modmailPing !== false, greeting: src.modmailGreeting || null, closeMessage: src.modmailCloseMessage || null, blocked: Array.isArray(src.modmailBlocked) ? src.modmailBlocked : [] },
+        joinGate: { enabled: !!src.joinGateEnabled, days: src.joinGateDays || 7, action: src.joinGateAction || 'kick', mute: src.joinGateMute || '1d', noAvatar: !!src.joinGateNoAvatar, allowed: Array.isArray(src.joinGateAllowed) ? src.joinGateAllowed : [] },
+        lockdown: src.lockdown || null
     };
     extrasCache.set(guildId, extras);
     return extras;
@@ -6677,6 +6878,8 @@ function docStore(Model, name) {
 }
 
 const ticketStore = docStore(Ticket, 'tickets');
+const noteStore = docStore(Note, 'notes');
+const tempRoleStore = docStore(TempRole, 'temproles');
 
 const MODMAIL_UPLOAD_BYTES = 10 * 1024 * 1024;
 const modmailPrompted = new Map();
@@ -6831,8 +7034,11 @@ async function userRecord(guild, userId) {
         const type = INFRACTION_TYPES[r.action_type] || 'warn';
         counts[type] = (counts[type] || 0) + 1;
     }
-    const tickets = await ticketStore.count({ guildId: guild.id, userId }).catch(() => 0);
-    return { rows, counts, total: counted.length, tickets };
+    const [notes, tickets] = await Promise.all([
+        noteStore.count({ guildId: guild.id, userId }).catch(() => 0),
+        ticketStore.count({ guildId: guild.id, userId }).catch(() => 0)
+    ]);
+    return { rows, counts, total: counted.length, notes, tickets };
 }
 
 const countsText = (record) => (record.total ? `${record.total} (${Object.entries(record.counts).map(([type, n]) => `${type} ${n}`).join(' / ')})` : 'none');
@@ -6842,7 +7048,7 @@ function renderTicketHeader({ ticket, user, member, record }) {
         `> user: <@${ticket.userId}> / ${userName(user, ticket.userId)} / \`${ticket.userId}\``,
         `> account: created <t:${Math.floor(snowflakeTime(ticket.userId) / 1000)}:R>`,
         `> member: ${member?.joinedTimestamp ? `joined <t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'not in the server'}`,
-        ...(record ? [`> infractions: ${countsText(record)}`, `> earlier tickets: ${Math.max(0, record.tickets - 1)}`] : [])
+        ...(record ? [`> infractions: ${countsText(record)}`, `> notes: ${record.notes} / earlier tickets: ${Math.max(0, record.tickets - 1)}`] : [])
     ].join('\n');
     const container = containerHeader(new ContainerBuilder(), `modmail \`#${ticket.number}\`\n${facts}`, user?.displayAvatarURL?.() || okiteIcon());
     const status = ticket.status === 'closed'
@@ -7503,6 +7709,503 @@ async function runModmailCommand(interaction, { isMod, isManager }) {
     return null;
 }
 
+async function renderWhois(guild, user) {
+    const [member, record, notes, openTicket] = await Promise.all([
+        guild.members.fetch(user.id).catch(() => null),
+        userRecord(guild, user.id),
+        noteStore.find({ guildId: guild.id, userId: user.id }, { sort: { createdAt: -1 }, limit: 3 }).catch(() => []),
+        ticketStore.findOne({ guildId: guild.id, userId: user.id, status: 'open' }).catch(() => null)
+    ]);
+    const ban = member ? null : await guild.bans.fetch({ user: user.id, force: true }).catch(() => null);
+    const created = Math.floor(user.createdTimestamp / 1000);
+    const head = `${plainText(user.globalName ?? user.username)}\n-# ${plainText(user.username)} / \`${user.id}\`${user.bot ? ' / bot' : ''}`;
+    const container = containerHeader(new ContainerBuilder(), head, user.displayAvatarURL?.({ size: 256 }) || okiteIcon());
+
+    const about = [`\`-\` account created <t:${created}:D> (<t:${created}:R>)`];
+    if (member) {
+        const joined = Math.floor(member.joinedTimestamp / 1000);
+        about.push(`\`-\` joined <t:${joined}:D> (<t:${joined}:R>)`);
+        if (member.nickname) about.push(`\`-\` nickname: ${plainText(member.nickname)}`);
+        const roles = member.roles.cache.filter(r => r.id !== guild.id).sort((x, y) => y.position - x.position);
+        if (roles.size) about.push(`\`-\` roles (${roles.size}): ${roles.first(15).map(r => `<@&${r.id}>`).join(' ')}${roles.size > 15 ? ' …' : ''}`);
+        if (member.communicationDisabledUntilTimestamp > Date.now()) about.push(`\`-\` timed out until <t:${Math.floor(member.communicationDisabledUntilTimestamp / 1000)}:f>`);
+        if (member.premiumSinceTimestamp) about.push(`\`-\` boosting since <t:${Math.floor(member.premiumSinceTimestamp / 1000)}:D>`);
+    } else {
+        about.push(`\`-\` not in the server${ban ? ' / banned' : ''}`);
+        if (ban?.reason) about.push(quoteBlock(clip(ban.reason.replace(/\s+/g, ' '), 300)));
+    }
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(about.join('\n')));
+
+    const labels = Object.fromEntries((await getServerRules(guild.id).catch(() => [])).map(r => [r.id, r.label]));
+    const history = [`\`-\` infractions: ${countsText(record)}`];
+    for (const row of record.rows.slice(0, 3)) {
+        const text = (!row.rule_id || row.rule_id === 'custom') ? row.rule_text_snapshot : (row.reason && row.reason !== 'not specified' ? row.reason : stripRulePrefix(labels[row.rule_id]) || row.rule_text_snapshot);
+        history.push(`> \`#${row.case_number}\` ${INFRACTION_TYPES[row.action_type] || 'warn'} <t:${unix(row.created_at)}:d>${row.status === 'voided' ? ' / voided' : ''} / ${clip(plainText(String(text || 'not specified').replace(/\s+/g, ' ')), 120)}`);
+    }
+    history.push(`\`-\` notes: ${record.notes}`);
+    for (const note of notes) history.push(`> ${clip(plainText(note.text.replace(/\s+/g, ' ')), 160)} / <@${note.authorId}> <t:${unix(note.createdAt)}:R>`);
+    history.push(`\`-\` modmail: ${record.tickets} ticket${record.tickets === 1 ? '' : 's'}${openTicket?.threadId ? ` / open: <#${openTicket.threadId}>` : ''}`);
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(clip(history.join('\n'), 3500)));
+    return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], allowedMentions: { parse: [] } };
+}
+
+function renderNotes(user, notes) {
+    const head = `notes on ${userName(user)}\n-# \`${user.id}\``;
+    const container = containerHeader(new ContainerBuilder(), head, user.displayAvatarURL?.() || okiteIcon());
+    const body = notes.length
+        ? notes.map((n, i) => `\`${i + 1}\` <@${n.authorId}> <t:${unix(n.createdAt)}:R>\n${quoteBlock(clip(plainText(n.text), 600))}`).join('\n')
+        : 'no notes yet. add one with `/note add`.';
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(clip(body, 3800)));
+    return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], allowedMentions: { parse: [] } };
+}
+
+async function runNoteCommand(interaction) {
+    const { options, guild } = interaction;
+    const sub = options.getSubcommand();
+    const user = options.getUser('user');
+    if (!user) return interaction.reply({ content: 'pick a user.', ephemeral: true });
+    const all = () => noteStore.find({ guildId: guild.id, userId: user.id }, { sort: { createdAt: 1 } });
+    if (sub === 'list') return interaction.reply(renderNotes(user, await all()));
+    if (sub === 'add') {
+        const text = (options.getString('text') || '').trim();
+        if (!text) return interaction.reply({ content: 'write the note.', ephemeral: true });
+        await noteStore.create({ guildId: guild.id, userId: user.id, authorId: interaction.user.id, text: clip(text, 1500) });
+        logInBackground(guild, {
+            title: 'mod note added',
+            kind: 'moderation',
+            color: COLORS.muted,
+            fields: [{ name: 'user', value: who(user), inline: true }, { name: 'moderator', value: who(interaction.user), inline: true }, { name: 'note', value: clip(text, 1000) }]
+        });
+        return interaction.reply(renderNotes(user, await all()));
+    }
+    const list = await all();
+    const n = options.getInteger('number');
+    if (!Number.isInteger(n) || n < 1 || n > list.length) return interaction.reply({ content: list.length ? `pick a number from 1 to ${list.length}.` : 'they have no notes.', ephemeral: true });
+    const note = list[n - 1];
+    await noteStore.remove(note._id);
+    logInBackground(guild, {
+        title: 'mod note removed',
+        kind: 'moderation',
+        color: COLORS.muted,
+        fields: [{ name: 'user', value: who(user), inline: true }, { name: 'moderator', value: who(interaction.user), inline: true }, { name: 'note', value: clip(note.text, 1000) }]
+    });
+    return interaction.reply(renderNotes(user, await all()));
+}
+
+async function renderModStats(guild, days, moderator) {
+    const since = new Date(Date.now() - days * 86400e3);
+    const stats = new Map();
+    const bump = (id, key) => {
+        if (!id) return;
+        if (!stats.has(id)) stats.set(id, { total: 0, kinds: {} });
+        const s = stats.get(id);
+        s.total += 1;
+        s.kinds[key] = (s.kinds[key] || 0) + 1;
+    };
+    if (supabase) {
+        let from = 0;
+        for (let page = 0; page < 10; page++) {
+            const { data, error } = await supabase.from('infractions').select('moderator_id,action_type,status').eq('guild_id', guild.id).gte('created_at', since.toISOString()).range(from, from + 999);
+            if (error || !data?.length) break;
+            for (const row of data) if (row.status !== 'voided') bump(row.moderator_id, INFRACTION_TYPES[row.action_type] || 'warn');
+            if (data.length < 1000) break;
+            from += 1000;
+        }
+    }
+    const tickets = await ticketStore.find({ guildId: guild.id, status: 'closed', closedAt: { $gte: since } }).catch(() => []);
+    for (const t of tickets) if (t.closedBy !== client.user.id) bump(t.closedBy, 'modmail');
+    if (useAppealDb()) {
+        const appeals = await Appeal.find({ guildId: guild.id, decidedAt: { $gte: since } }).select('decidedBy').lean().catch(() => []);
+        for (const a of appeals) bump(a.decidedBy, 'appeals');
+    }
+    let rows = [...stats.entries()].sort((x, y) => y[1].total - x[1].total);
+    if (moderator) rows = rows.filter(([id]) => id === moderator.id);
+    const total = rows.reduce((sum, [, s]) => sum + s.total, 0);
+    const people = rows.filter(([id]) => id !== client.user.id).length;
+    const head = `mod stats / last ${days} day${days === 1 ? '' : 's'}\n> ${total} action${total === 1 ? '' : 's'}${moderator ? ` by <@${moderator.id}>` : ` by ${people} mod${people === 1 ? '' : 's'}`}`;
+    const container = containerHeader(new ContainerBuilder(), head, guild.iconURL?.() || okiteIcon());
+    const order = ['ban', 'softban', 'kick', 'mute', 'warn', 'modmail', 'appeals'];
+    const body = rows.slice(0, 20).map(([id, s]) => {
+        const kinds = order.filter(k => s.kinds[k]).map(k => `${k} ${s.kinds[k]}`).join(' / ');
+        return `\`-\` <@${id}>${id === client.user.id ? ' (automatic)' : ''}: ${s.total}\n> ${kinds}`;
+    }).join('\n');
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(body || 'nothing recorded in that window.'));
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock('-# infractions (voided ones skipped), closed modmail tickets and decided appeals'));
+    return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], allowedMentions: { parse: [] } };
+}
+
+const ROLES_PER_PAGE = 30;
+async function renderRoles(guild, page = 0) {
+    const counts = await client.rest.get(`/guilds/${guild.id}/roles/member-counts`).catch(() => null);
+    const roles = [...guild.roles.cache.values()].filter(r => r.id !== guild.id).sort((x, y) => y.position - x.position);
+    const pages = Math.max(1, Math.ceil(roles.length / ROLES_PER_PAGE));
+    const at = Math.min(Math.max(0, page), pages - 1);
+    const lines = roles.slice(at * ROLES_PER_PAGE, (at + 1) * ROLES_PER_PAGE).map(r => {
+        const count = counts ? (counts[r.id] ?? 0) : r.members.size;
+        const tags = [
+            r.hexColor && r.color ? r.hexColor : null,
+            r.managed ? (r.tags?.botId ? 'bot' : 'integration') : null,
+            r.tags?.premiumSubscriberRole ? 'boosters' : null,
+            r.hoist ? 'hoisted' : null,
+            r.permissions.has(PermissionFlagsBits.Administrator) ? 'admin' : null
+        ].filter(Boolean);
+        return `\`-\` <@&${r.id}> \`${count}\`${tags.length ? ` / ${tags.join(' / ')}` : ''}`;
+    });
+    const container = containerHeader(new ContainerBuilder(), `roles / ${roles.length}\n-# highest first. the number is how many members have it${counts ? '' : ' (from okite\'s cache, may be low)'}.`, guild.iconURL?.() || okiteIcon());
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(lines.join('\n') || 'no roles yet.'));
+    const components = [container];
+    if (pages > 1) {
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rolespage:${at - 1}`).setLabel('Previous').setStyle(ButtonStyle.Secondary).setDisabled(at === 0),
+            new ButtonBuilder().setCustomId('rolespage:count').setLabel(`${at + 1} / ${pages}`).setStyle(ButtonStyle.Secondary).setDisabled(true),
+            new ButtonBuilder().setCustomId(`rolespage:${at + 1}`).setLabel('Next').setStyle(ButtonStyle.Secondary).setDisabled(at >= pages - 1)
+        ));
+    }
+    return { flags: V2_FLAG, components, allowedMentions: { parse: [] } };
+}
+
+async function runVoiceCommand(interaction) {
+    const { options, guild } = interaction;
+    const perms = interaction.memberPermissions;
+    if (!perms?.has(PermissionFlagsBits.MoveMembers) && !perms?.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: 'you need **Move Members** to use this command.', ephemeral: true });
+    const to = options.getChannel('to');
+    if (!to || !to.isVoiceBased?.()) return interaction.reply({ content: 'the destination has to be a voice or stage channel.', ephemeral: true });
+    if (!to.permissionsFor(guild.members.me)?.has([PermissionFlagsBits.MoveMembers, PermissionFlagsBits.Connect, PermissionFlagsBits.ViewChannel])) {
+        return interaction.reply({ content: `okite needs View Channel, Connect and Move Members in <#${to.id}>.`, ephemeral: true });
+    }
+    const canMove = (channel, extra = []) => channel.permissionsFor(interaction.member)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.MoveMembers, ...extra]);
+    if (!canMove(to, [PermissionFlagsBits.Connect])) return interaction.reply({ content: `you need View Channel, Connect and Move Members in <#${to.id}>.`, ephemeral: true });
+    const user = options.getUser('user');
+    const from = options.getChannel('from') ?? (user ? null : interaction.member?.voice?.channel ?? null);
+    let members;
+    if (user) {
+        const member = await guild.members.fetch(user.id).catch(() => null);
+        if (!member?.voice?.channelId) return interaction.reply({ content: 'they are not in a voice channel.', ephemeral: true });
+        if (member.voice.channelId === to.id) return interaction.reply({ content: `they are already in <#${to.id}>.`, ephemeral: true });
+        if (!member.voice.channel || !canMove(member.voice.channel)) return interaction.reply({ content: 'you need View Channel and Move Members in the channel they are in.', ephemeral: true });
+        members = [member];
+    } else {
+        if (!from?.isVoiceBased?.()) return interaction.reply({ content: 'pick a user or a channel to move from, or join a voice channel first.', ephemeral: true });
+        if (from.id === to.id) return interaction.reply({ content: 'that is the same channel.', ephemeral: true });
+        if (!canMove(from)) return interaction.reply({ content: `you need View Channel and Move Members in <#${from.id}>.`, ephemeral: true });
+        members = [...from.members.values()];
+        if (!members.length) return interaction.reply({ content: `nobody is in <#${from.id}>.`, ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    let moved = 0;
+    let already = 0;
+    for (const member of members) {
+        if (member.voice.channelId === to.id) { already += 1; continue; }
+        const ok = await member.voice.setChannel(to, `moved by ${interaction.user.tag ?? interaction.user.username} (${interaction.user.id})`).then(() => true).catch(() => false);
+        if (ok) moved += 1;
+    }
+    if (moved) logInBackground(guild, {
+        title: 'voice members moved',
+        kind: 'voice',
+        color: COLORS.action,
+        fields: [
+            { name: 'moderator', value: who(interaction.user), inline: true },
+            { name: 'moved', value: user ? who(user) : `${moved} from <#${from.id}>`, inline: true },
+            { name: 'to', value: `<#${to.id}>`, inline: true }
+        ]
+    });
+    const failed = members.length - moved - already;
+    return interaction.editReply(`moved ${moved} member${moved === 1 ? '' : 's'} to <#${to.id}>.${failed > 0 ? ` ${failed} could not be moved.` : ''}`);
+}
+
+const describeJoinGate = (g) => (g.enabled
+    ? [
+        `join gate is on: accounts younger than ${g.days} day${g.days === 1 ? '' : 's'}${g.noAvatar ? ', or with no profile picture,' : ''} are ${g.action === 'kick' ? 'kicked' : g.action === 'mute' ? `timed out for ${g.mute}` : 'only logged'} when they join.`,
+        `\`-\` allowed through anyway: ${g.allowed.length ? g.allowed.slice(0, 20).map(id => `<@${id}>`).join(', ') : 'nobody'}`
+    ].join('\n')
+    : 'join gate is off. turn it on with `/joingate enabled:true`.');
+
+async function runJoinGateCommand(interaction) {
+    const { options, guild } = interaction;
+    const current = (await getExtras(guild.id)).joinGate;
+    const enabled = options.getBoolean('enabled');
+    const days = options.getInteger('days');
+    const action = options.getString('action');
+    const mute = options.getString('mute');
+    const noAvatar = options.getBoolean('noavatar');
+    const allow = options.getUser('allow');
+    const unallow = options.getUser('unallow');
+    const given = [enabled, days, action, mute, noAvatar, allow, unallow].some(v => v !== null && v !== undefined);
+    if (!given) return interaction.reply({ content: describeJoinGate(current), ephemeral: true, allowedMentions: { parse: [] } });
+    if (action && !['kick', 'mute', 'log'].includes(action)) return interaction.reply({ content: 'the action is `kick`, `mute` or `log`.', ephemeral: true });
+    const muteLength = mute ? parseDuration(mute) : null;
+    if (mute && (!muteLength || muteLength.permanent || muteLength.ms < 60_000 || muteLength.ms > MAX_TIMEOUT_MS)) return interaction.reply({ content: 'the mute has to be between 1 minute and 27 days, like `1h` or `1d`.', ephemeral: true });
+    const me = guild.members.me;
+    const wantAction = action || current.action;
+    const perms = interaction.memberPermissions;
+    const needs = wantAction === 'kick' ? [PermissionFlagsBits.KickMembers, 'Kick Members'] : wantAction === 'mute' ? [PermissionFlagsBits.ModerateMembers, 'Timeout Members'] : null;
+    if (needs && (enabled ?? current.enabled) && !perms?.has(needs[0]) && !perms?.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: `you need **${needs[1]}** to have the join gate ${wantAction} people.`, ephemeral: true });
+    if ((enabled ?? current.enabled) && wantAction === 'kick' && !me.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: 'okite needs **Kick Members** to kick new accounts.', ephemeral: true });
+    if ((enabled ?? current.enabled) && wantAction === 'mute' && !me.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: 'okite needs **Timeout Members** to mute new accounts.', ephemeral: true });
+    const update = {};
+    if (enabled !== null && enabled !== undefined) update.joinGateEnabled = enabled;
+    if (days !== null && days !== undefined) update.joinGateDays = Math.min(365, Math.max(1, days));
+    if (action) update.joinGateAction = action;
+    if (muteLength) update.joinGateMute = mute.trim().toLowerCase();
+    if (noAvatar !== null && noAvatar !== undefined) update.joinGateNoAvatar = noAvatar;
+    if (allow || unallow) {
+        const list = new Set(current.allowed);
+        if (allow) list.add(allow.id);
+        if (unallow) list.delete(unallow.id);
+        update.joinGateAllowed = [...list];
+    }
+    await setExtras(guild.id, update);
+    const now = (await getExtras(guild.id)).joinGate;
+    const summary = (g) => (g.enabled ? `on / ${g.days}d / ${g.action}${g.noAvatar ? ' / no avatar' : ''}` : 'off');
+    logInBackground(guild, {
+        title: 'join gate changed',
+        kind: 'server',
+        fields: [
+            { name: 'moderator', value: who(interaction.user), inline: true },
+            { name: 'before', value: summary(current), inline: true },
+            { name: 'now', value: summary(now), inline: true }
+        ]
+    });
+    return interaction.reply({ content: describeJoinGate(now), ephemeral: true, allowedMentions: { parse: [] } });
+}
+
+async function checkJoinGate(member) {
+    if (member.user.bot) return false;
+    const gate = (await getExtras(member.guild.id)).joinGate;
+    if (!gate.enabled || gate.allowed.includes(member.id)) return false;
+    const ageMs = Date.now() - member.user.createdTimestamp;
+    const young = ageMs < gate.days * 86400e3;
+    const bare = gate.noAvatar && !member.user.avatar;
+    if (!young && !bare) return false;
+    const guild = member.guild;
+    const ageDays = Math.floor(ageMs / 86400e3);
+    const why = young ? `account is ${ageDays} day${ageDays === 1 ? '' : 's'} old (the minimum is ${gate.days})` : 'account has no profile picture';
+    const readyAt = Math.floor((member.user.createdTimestamp + gate.days * 86400e3) / 1000);
+    let result = 'flagged';
+    if (gate.action === 'kick') {
+        const note = young
+            ? `you can't join ${plainText(guild.name)} yet. accounts there need to be at least ${gate.days} day${gate.days === 1 ? '' : 's'} old. you can rejoin <t:${readyAt}:R>.`
+            : `you can't join ${plainText(guild.name)} without a profile picture. add one and rejoin.`;
+        await member.send(cardPayload(note)).catch(() => null);
+        botKicks.add(`${guild.id}:${member.id}`);
+        setTimeout(() => botKicks.delete(`${guild.id}:${member.id}`), 30000).unref();
+        result = await member.kick(`join gate: ${why}`).then(() => 'kicked').catch(() => 'flagged (okite could not kick)');
+    } else if (gate.action === 'mute') {
+        const length = parseDuration(gate.mute);
+        const ok = length && await member.timeout(Math.min(length.ms, MAX_TIMEOUT_MS), `join gate: ${why}`).then(() => true).catch(() => false);
+        if (ok) await member.send(cardPayload(`you were muted for ${gate.mute} on joining ${plainText(guild.name)} because your ${why}. you can talk again <t:${Math.floor((Date.now() + length.ms) / 1000)}:R>.`)).catch(() => null);
+        result = ok ? `muted for ${gate.mute}` : 'flagged (okite could not mute)';
+    }
+    logInBackground(guild, {
+        title: `join gate: ${result.split(' ')[0]}`,
+        kind: 'members',
+        color: result.startsWith('kicked') ? COLORS.danger : COLORS.action,
+        fields: [
+            { name: 'user', value: who(member.user), inline: true },
+            { name: 'account created', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true },
+            { name: 'result', value: result, inline: true },
+            { name: 'reason', value: why }
+        ]
+    });
+    return result.startsWith('kicked');
+}
+
+const LOCK_KEYS = ['SendMessages', 'SendMessagesInThreads', 'CreatePublicThreads', 'CreatePrivateThreads'];
+const LOCKABLE_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum, ChannelType.GuildVoice, ChannelType.GuildStageVoice];
+const overwriteState = (overwrite) => Object.fromEntries(LOCK_KEYS.map(k => [k, overwrite?.allow.has(PermissionFlagsBits[k]) ? true : overwrite?.deny.has(PermissionFlagsBits[k]) ? false : null]));
+const isStaffRole = (role) => role.permissions.has(PermissionFlagsBits.ManageMessages) || role.permissions.has(PermissionFlagsBits.Administrator);
+
+const lockdownBusy = new Set();
+
+async function runLockdownCommand(interaction) {
+    const sub = interaction.options.getSubcommand();
+    if (sub === 'status') return lockdownStep(interaction, sub);
+    const guildId = interaction.guild.id;
+    if (lockdownBusy.has(guildId)) return interaction.reply({ content: 'a lockdown change is already running here. try again in a moment.', ephemeral: true });
+    lockdownBusy.add(guildId);
+    try {
+        return await lockdownStep(interaction, sub);
+    } finally {
+        lockdownBusy.delete(guildId);
+    }
+}
+
+async function lockdownStep(interaction, sub) {
+    const { options, guild } = interaction;
+    const current = (await getExtras(guild.id)).lockdown;
+    if (sub === 'status') {
+        return interaction.reply({
+            content: current?.active ? `lockdown is on since <t:${unix(current.at)}:R>, started by <@${current.by}>. ${current.channels.length} channel${current.channels.length === 1 ? '' : 's'} locked.${current.reason ? `\n${quoteBlock(clip(current.reason, 500))}` : ''}` : 'no lockdown is running.',
+            ephemeral: true,
+            allowedMentions: { parse: [] }
+        });
+    }
+    const me = guild.members.me;
+    if (!me.permissions.has(PermissionFlagsBits.ManageRoles) || !me.permissions.has(PermissionFlagsBits.ManageChannels)) {
+        return interaction.reply({ content: 'okite needs **Manage Channels** and **Manage Roles** for a lockdown.', ephemeral: true });
+    }
+    if (sub === 'on') {
+        if (current?.active) return interaction.reply({ content: `a lockdown is already on since <t:${unix(current.at)}:R>. end it with \`/lockdown off\`.`, ephemeral: true });
+        const reason = (options.getString('reason') || '').trim() || null;
+        const notice = options.getBoolean('notice') ?? true;
+        await interaction.deferReply({ ephemeral: true });
+        const everyone = guild.roles.everyone;
+        const record = { active: true, by: interaction.user.id, at: new Date().toISOString(), reason, notice, channels: [] };
+        let skipped = 0;
+        for (const channel of guild.channels.cache.values()) {
+            if (!LOCKABLE_TYPES.includes(channel.type)) continue;
+            if (!channel.permissionsFor(everyone)?.has(PermissionFlagsBits.ViewChannel)) continue;
+            if (!channel.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ManageChannels])) { skipped += 1; continue; }
+            const targets = [everyone.id];
+            for (const [id, ow] of channel.permissionOverwrites.cache) {
+                if (ow.type !== 0 || id === everyone.id) continue;
+                const role = guild.roles.cache.get(id);
+                if (!role || isStaffRole(role) || me.roles.highest.comparePositionTo(role) <= 0) continue;
+                if (ow.allow.has(PermissionFlagsBits.SendMessages)) targets.push(id);
+            }
+            const changed = [];
+            for (const id of targets) {
+                const before = channel.permissionOverwrites.cache.get(id);
+                const prev = overwriteState(before);
+                const ok = await channel.permissionOverwrites.edit(id, Object.fromEntries(LOCK_KEYS.map(k => [k, false])), { reason: `lockdown by ${interaction.user.tag ?? interaction.user.username} (${interaction.user.id})` }).then(() => true).catch(() => false);
+                if (ok) changed.push({ id, prev, existed: Boolean(before) });
+            }
+            if (!changed.length) continue;
+            if (!channel.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)) {
+                const before = channel.permissionOverwrites.cache.get(me.id);
+                const prev = overwriteState(before);
+                const ok = await channel.permissionOverwrites.edit(me.id, { SendMessages: true, SendMessagesInThreads: true }, { reason: 'lockdown: okite keeps posting here' }).then(() => true).catch(() => false);
+                if (ok) changed.push({ id: me.id, prev, existed: Boolean(before) });
+            }
+            const entry = { id: channel.id, overwrites: changed, noticeId: null };
+            if (notice && channel.isTextBased?.()) {
+                const posted = await channel.send(cardPayload(`channel locked.${reason ? `\n${quoteBlock(clip(reason, 500))}` : ''}`)).catch(() => null);
+                entry.noticeId = posted?.id ?? null;
+            }
+            record.channels.push(entry);
+            await setExtras(guild.id, { lockdown: record });
+        }
+        await setExtras(guild.id, { lockdown: record });
+        logInBackground(guild, {
+            title: 'lockdown on',
+            kind: 'moderation',
+            color: COLORS.danger,
+            fields: [
+                { name: 'moderator', value: who(interaction.user), inline: true },
+                { name: 'channels locked', value: String(record.channels.length), inline: true },
+                { name: 'skipped', value: skipped ? `${skipped} (okite lacks access)` : '', inline: true },
+                { name: 'reason', value: reason || '' }
+            ]
+        });
+        return interaction.editReply(`lockdown on. ${record.channels.length} channel${record.channels.length === 1 ? '' : 's'} locked${skipped ? `, ${skipped} skipped because okite lacks access there` : ''}. end it with \`/lockdown off\`.`);
+    }
+    if (!current?.active) return interaction.reply({ content: 'no lockdown is running.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    let restored = 0;
+    for (const entry of current.channels) {
+        const channel = guild.channels.cache.get(entry.id);
+        if (!channel) continue;
+        for (const ow of entry.overwrites) {
+            await channel.permissionOverwrites.edit(ow.id, ow.prev, { reason: `lockdown ended by ${interaction.user.tag ?? interaction.user.username} (${interaction.user.id})` }).catch(() => null);
+            const after = channel.permissionOverwrites.cache.get(ow.id);
+            if (!ow.existed && after && after.allow.bitfield === 0n && after.deny.bitfield === 0n) await after.delete().catch(() => null);
+        }
+        if (entry.noticeId) await channel.messages.delete(entry.noticeId).catch(() => null);
+        if (current.notice !== false && channel.isTextBased?.()) await channel.send(cardPayload('channel unlocked.')).catch(() => null);
+        restored += 1;
+    }
+    await setExtras(guild.id, { lockdown: null });
+    logInBackground(guild, {
+        title: 'lockdown off',
+        kind: 'moderation',
+        color: COLORS.good,
+        fields: [
+            { name: 'moderator', value: who(interaction.user), inline: true },
+            { name: 'channels reopened', value: String(restored), inline: true },
+            { name: 'lasted', value: formatDuration(Date.now() - new Date(current.at).getTime()), inline: true }
+        ]
+    });
+    return interaction.editReply(`lockdown off. ${restored} channel${restored === 1 ? '' : 's'} reopened with their old permissions.`);
+}
+
+async function sweepTempRoles() {
+    const due = await tempRoleStore.find({ expiresAt: { $lte: new Date() } }, { limit: 50 }).catch(() => []);
+    for (const row of due) {
+        const guild = client.guilds.cache.get(row.guildId);
+        if (!guild) {
+            if (client.isReady?.()) await tempRoleStore.remove(row._id);
+            continue;
+        }
+        const member = await guild.members.fetch(row.userId).catch(() => null);
+        if (member?.roles.cache.has(row.roleId)) {
+            const ok = await member.roles.remove(row.roleId, `temporary role expired (${row.duration || 'timed'})`).then(() => true).catch(err => { console.error('temp role removal error:', err.message); return false; });
+            logInBackground(guild, {
+                title: ok ? 'temporary role expired' : 'temporary role could not be removed',
+                kind: 'members',
+                color: ok ? COLORS.muted : COLORS.danger,
+                fields: [
+                    { name: 'user', value: who(member.user), inline: true },
+                    { name: 'role', value: `<@&${row.roleId}>`, inline: true },
+                    { name: 'given by', value: row.addedBy ? `<@${row.addedBy}>` : '', inline: true },
+                    { name: 'duration', value: row.duration || '' },
+                    { name: 'note', value: ok ? '' : 'okite could not remove it. check that okite\'s role is above it.' }
+                ]
+            });
+        }
+        await tempRoleStore.remove(row._id);
+    }
+}
+setInterval(() => sweepTempRoles().catch(err => console.error('temp role sweep error:', err.message)), 60 * 1000).unref();
+
+const VERIFICATION_TEXT = ['none', 'low (verified email)', 'medium (registered over 5 minutes)', 'high (member over 10 minutes)', 'highest (verified phone)'];
+const FILTER_TEXT = ['off', 'members without roles', 'everyone'];
+const SHOWN_FEATURES = { COMMUNITY: 'community', DISCOVERABLE: 'discoverable', PARTNERED: 'partnered', VERIFIED: 'verified', VANITY_URL: 'vanity link', ANIMATED_ICON: 'animated icon', BANNER: 'banner', WELCOME_SCREEN_ENABLED: 'welcome screen', MEMBER_VERIFICATION_GATE_ENABLED: 'rules screening', ROLE_SUBSCRIPTIONS_ENABLED: 'role subscriptions', TICKETED_EVENTS_ENABLED: 'ticketed events', AUTO_MODERATION: 'automod' };
+
+async function renderServerInfo(guild) {
+    const fresh = await client.guilds.fetch({ guild: guild.id, withCounts: true, force: true }).catch(() => null);
+    const members = fresh?.approximateMemberCount ?? guild.memberCount;
+    const online = fresh?.approximatePresenceCount ?? null;
+    const channels = [...guild.channels.cache.values()];
+    const count = (...types) => channels.filter(c => types.includes(c.type)).length;
+    const n = (value) => Number(value || 0).toLocaleString('en-US');
+    const plural = (value, word) => `${n(value)} ${word}${value === 1 ? '' : 's'}`;
+    const created = Math.floor(guild.createdTimestamp / 1000);
+    const container = new ContainerBuilder();
+    const banner = guild.bannerURL?.({ size: 1024 });
+    if (banner) container.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(banner).setDescription(`${guild.name} banner`)));
+    const head = `${plainText(guild.name)}\n-# \`${guild.id}\`${guild.description ? `\n${quoteBlock(clip(plainText(guild.description), 300))}` : ''}`;
+    containerHeader(container, head, guild.iconURL?.({ size: 256 }) || okiteIcon());
+
+    const channelParts = [
+        [count(ChannelType.GuildText, ChannelType.GuildAnnouncement), 'text'],
+        [count(ChannelType.GuildVoice, ChannelType.GuildStageVoice), 'voice'],
+        [count(ChannelType.GuildForum, ChannelType.GuildMedia), 'forum'],
+        [count(ChannelType.GuildCategory), 'categories']
+    ].filter(([value]) => value).map(([value, word]) => `${n(value)} ${word}`);
+    const about = [
+        `\`-\` owner: <@${guild.ownerId}>`,
+        `\`-\` created <t:${created}:D> (<t:${created}:R>)`,
+        `\`-\` members: ${n(members)}${online !== null ? ` (${n(online)} online)` : ''}`,
+        `\`-\` channels: ${channelParts.join(' / ') || 'none'}`,
+        `\`-\` roles: ${n(guild.roles.cache.size - 1)} / emojis: ${n(guild.emojis.cache.size)} / stickers: ${n(guild.stickers.cache.size)}`,
+        `\`-\` boosts: ${guild.premiumTier ? `level ${guild.premiumTier}` : 'no level'} / ${plural(guild.premiumSubscriptionCount ?? 0, 'boost')}`
+    ];
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(about.join('\n')));
+
+    const features = guild.features.map(f => SHOWN_FEATURES[f]).filter(Boolean);
+    const safety = [
+        `\`-\` verification: ${VERIFICATION_TEXT[guild.verificationLevel] ?? 'unknown'}`,
+        `\`-\` media filter: ${FILTER_TEXT[guild.explicitContentFilter] ?? 'unknown'}`,
+        `\`-\` 2FA for mod actions: ${guild.mfaLevel ? 'required' : 'off'}`,
+        ...(guild.vanityURLCode ? [`\`-\` vanity: discord.gg/${guild.vanityURLCode}`] : []),
+        ...(features.length ? [`\`-\` features: ${features.join(', ')}`] : [])
+    ];
+    container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(safety.join('\n')));
+    const joined = guild.members.me?.joinedTimestamp;
+    if (joined) container.addSeparatorComponents(divider()).addTextDisplayComponents(textBlock(`-# okite joined <t:${Math.floor(joined / 1000)}:R>`));
+    return { flags: V2_FLAG | MessageFlags.Ephemeral, components: [container], allowedMentions: { parse: [] } };
+}
+
 const PERM_CHOICES = [
     ['ViewChannel', 'View Channel'], ['SendMessages', 'Send Messages'], ['SendMessagesInThreads', 'Send Messages in Threads'],
     ['CreatePublicThreads', 'Create Public Threads'], ['CreatePrivateThreads', 'Create Private Threads'], ['EmbedLinks', 'Embed Links'],
@@ -7667,11 +8370,26 @@ async function handlePermsComponent(interaction) {
 
 async function runExtraCommand(interaction, { isMod, isManager }) {
     if (interaction.commandName === 'perms') return runPermsCommand(interaction);
-    if (interaction.commandName === 'modmail') return runModmailCommand(interaction, { isMod, isManager });
+    const { commandName } = interaction;
+    if (commandName === 'serverinfo') return interaction.reply(await renderServerInfo(interaction.guild));
+    if (commandName === 'modmail') return runModmailCommand(interaction, { isMod, isManager });
+    if (commandName === 'roles') return interaction.reply({ ...(await renderRoles(interaction.guild, 0)), flags: V2_FLAG | MessageFlags.Ephemeral });
+    if (commandName === 'voice') return runVoiceCommand(interaction);
+    if (['joingate', 'lockdown'].includes(commandName) && !isManager) return interaction.reply({ content: 'you need **Manage Channels** to use this command.', ephemeral: true });
+    if (commandName === 'joingate') return runJoinGateCommand(interaction);
+    if (commandName === 'lockdown') return runLockdownCommand(interaction);
+    if (!isMod) return interaction.reply({ content: 'you need **Manage Messages** to use this command.', ephemeral: true });
+    if (commandName === 'whois') return interaction.reply(await renderWhois(interaction.guild, interaction.options.getUser('user') ?? interaction.user));
+    if (commandName === 'note') return runNoteCommand(interaction);
+    if (commandName === 'modstats') {
+        const days = Math.min(365, Math.max(1, interaction.options.getInteger('days') ?? 30));
+        await interaction.deferReply({ ephemeral: true });
+        return interaction.editReply(await renderModStats(interaction.guild, days, interaction.options.getUser('moderator')));
+    }
     return null;
 }
 
-const EXTRA_COMMANDS = ['modmail', 'perms'];
+const EXTRA_COMMANDS = ['serverinfo', 'modmail', 'roles', 'voice', 'joingate', 'lockdown', 'whois', 'note', 'modstats', 'perms'];
 
 client.on(Events.MessageCreate, safe(async (message) => {
     if (!message.guild) {

@@ -38,7 +38,7 @@ module.exports = {
     modmail: {
         summary: 'remote tickets: members talk to the mods through okite\'s DMs',
         syntax: 'modmail\nmodmail setup #channel [server] [noping]\nmodmail off\nmodmail greeting <text|reset>\nmodmail closing <text|reset>\nmodmail block|unblock @user\nmodmail open @user <message>',
-        desc: 'a member DMs okite (or uses `/modmail open` there), picks the server, and a remote-ticket opens. their first message only brings up that prompt. after that, everything they send goes to a ticket thread in the modmail channel, where a card shows who they are, and their infractions.\nin the thread, the member\'s messages and your replies build up in one card per round. `reply` answers them as the server (`modreply` signs it with your name), and plain messages stay between mods. the member sees nothing while they type. each reply sends them one card with what they wrote and your answer, and a second reply before they write again replaces that card.\nmembers end a ticket by typing `close` or with `/modmail close`, and pick which server they are talking to with `/modmail switch`. you end it with `close`. closing locks the thread and logs a transcript. alias: `mm`.',
+        desc: 'a member DMs okite (or uses `/modmail open` there), picks the server, and a remote-ticket opens. their first message only brings up that prompt. after that, everything they send goes to a ticket thread in the modmail channel, where a card shows who they are, their infractions and notes.\nin the thread, the member\'s messages and your replies build up in one card per round. `reply` answers them as the server (`modreply` signs it with your name), and plain messages stay between mods. the member sees nothing while they type. each reply sends them one card with what they wrote and your answer, and a second reply before they write again replaces that card.\nmembers end a ticket by typing `close` or with `/modmail close`, and pick which server they are talking to with `/modmail switch`. you end it with `close`. closing locks the thread and logs a transcript. alias: `mm`.',
         perm: 'Manage Messages (setup: Manage Channels)'
     },
     reply: {
@@ -52,6 +52,60 @@ module.exports = {
         syntax: 'close [reason] [--silent]',
         desc: 'closes the modmail ticket you are in. the user gets the reason by DM unless you add `--silent`. the thread is locked and a transcript goes to the log.',
         perm: 'Manage Messages'
+    },
+    whois: {
+        summary: 'everything about a member in one card',
+        syntax: 'whois [user]',
+        desc: 'account age, join date, nickname, roles, timeout and boost status, then their infractions with the latest three, mod notes and modmail tickets. works for people who left or were banned too. aliases: `userinfo`, `ui`.',
+        perm: 'Manage Messages'
+    },
+    note: {
+        summary: 'private mod notes on a user',
+        syntax: 'note @user <text>\nnote @user\nnote remove @user <number>',
+        desc: 'notes are for things that are not infractions, like "alt of x" or "talked to them in DMs". only mods see them, in `note @user`, `whois` and modmail tickets. the user is never told. alias: `notes`.',
+        perm: 'Manage Messages'
+    },
+    modstats: {
+        summary: 'how many actions each mod took',
+        syntax: 'modstats [days] [@mod]',
+        desc: 'counts infractions by type, closed modmail tickets and decided appeals per mod over the last 30 days, or the number of days you give. voided infractions do not count.',
+        perm: 'Manage Messages'
+    },
+    serverinfo: {
+        summary: 'everything about this server in one card',
+        syntax: 'serverinfo',
+        desc: 'owner, creation date, members and how many are online, channels by type, roles, emojis, stickers, boost level, verification level, media filter, 2FA for mods, vanity link and notable features, with the server banner on top. aliases: `si`, `server`, `guildinfo`.',
+        perm: 'none'
+    },
+    roles: {
+        summary: 'list every role in the server',
+        syntax: 'roles',
+        desc: 'every role from the top down, with how many members have it, its color and whether it is hoisted, admin, a bot role or the booster role.',
+        perm: 'none'
+    },
+    voice: {
+        summary: 'move members between voice channels',
+        syntax: 'move #to-channel [@user | #from-channel]',
+        desc: 'moves one member, everyone in a channel, or everyone in your current voice channel to another voice channel. alias: `move`.',
+        perm: 'Move Members'
+    },
+    joingate: {
+        summary: 'stop brand-new accounts at the door',
+        syntax: 'joingate\njoingate on|off\njoingate days <1-365>\njoingate action kick|mute|log\njoingate mute <duration>\njoingate noavatar on|off\njoingate allow|unallow @user',
+        desc: 'when someone joins with an account younger than the minimum (7 days by default), okite kicks them with a DM saying when they can come back, mutes them, or only logs it. it can also catch accounts with no profile picture. `allow` lets a specific person through. alias: `gate`.',
+        perm: 'Manage Channels'
+    },
+    lockdown: {
+        summary: 'lock every public channel at once',
+        syntax: 'lockdown on [reason] [--quiet]\nlockdown off\nlockdown',
+        desc: 'for raids. stops everyone who is not staff from sending messages, creating threads or posting in every channel @everyone can see, and posts `channel locked.` in each one unless you add `--quiet`. `lockdown off` puts back exactly the permissions each channel had, removes those notes and posts `channel unlocked.`',
+        perm: 'Manage Channels'
+    },
+    role: {
+        summary: 'give, take or create a role',
+        syntax: 'role add <user> <role> [duration]\nrole remove <user> <role>\nrole create <name> [#color]',
+        desc: 'gives a member a role or takes one away, or creates a new role with no permissions at the bottom of the list. give a duration like `7d` and okite takes the role away again when it runs out. the role can be a mention, an id or its exact name. you can only hand out roles below your top role, and not ones with permissions you lack. the audit log shows who ran it.',
+        perm: 'Manage Roles'
     },
     slowmode: {
         summary: 'set or revert a channel\'s slowmode',

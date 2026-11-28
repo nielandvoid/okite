@@ -1,6 +1,6 @@
 # Okite: Privacy Policy
 
-Last updated: 2026-11-27
+Last updated: 2026-11-28
 
 Okite is a Discord moderation bot. Server admins add it to their own server, configure it there, and decide who can use it. This page describes what Okite stores, why, for how long, and how to have it removed.
 
@@ -8,7 +8,7 @@ Okite is a Discord moderation bot. Server admins add it to their own server, con
 
 Message logging is **off by default** and is turned on per server by an admin with `/messagelogs`. While it is off, the message index and the message cache described below are not collected for that server, edits and deletes are not logged, and a ban makes no transcript. Everything else below (settings, infractions and the rest) is stored regardless.
 
-Okite only reads what Discord sends to bots in servers it has been added to. It does not use presence data. It reads direct messages sent to it only to pass them on as modmail (below), and the direct messages it sends are the user notifications, appeal results and modmail replies described below.
+Okite only reads what Discord sends to bots in servers it has been added to. It does not use presence data. It reads direct messages sent to it only to pass them on as modmail (below), and the direct messages it sends are the user notifications, appeal results, modmail replies and join gate notices described below.
 
 **Server settings** (per server): log channel IDs, command prefix, auto-purge, autocorrect and rule-required options, time zone, custom rules and command aliases, and which channels are locked.
 
@@ -23,6 +23,12 @@ Okite only reads what Discord sends to bots in servers it has been added to. It 
 **Ban appeals** (only in servers that turn them on): the answers a banned member types into the appeal form, their user ID, the infraction number, the status (pending, accepted or denied), who decided and when, and the optional note sent with a denial. They are kept so the mods can decide later and so a denied member waits 7 days before appealing again.
 
 **Modmail** (only in servers that turn it on): when you open a ticket from your DMs with Okite and choose a server, your messages, with any files, are re-posted in a private ticket thread in that server, where its moderators read and answer them. Okite stores the ticket itself: your user ID, the server, the thread, who opened, claimed and closed it, the close reason, message counts and times. While a ticket is open it also keeps the text of the current exchange (your latest messages and the mods' replies to them) so it can show you both together; that is replaced as the conversation moves on and cleared when the ticket closes. When a ticket is closed, a transcript of the thread is posted to the server's log channel. A DM sent before you open a ticket is not passed on or kept.
+
+**Mod notes**: notes moderators write about a user with `/note`, with the user ID, the author's user ID and the time. Only that server's moderators can see them. The user is not told.
+
+**Temporary roles**: when a moderator gives a role for a set time, the user ID, role ID, who gave it and when it ends, until okite removes the role.
+
+**Join gate and lockdown** (only in servers that turn them on): the minimum account age and action, a list of user IDs let through anyway, and during a lockdown the permissions each channel had before, so they can be put back.
 
 **Watchdog**: to spot one account posting the same thing in several channels, okite keeps the last few seconds of each member's messages in memory only (a fingerprint of the text and file sizes, the channel and the message ID). Nothing of this is written to the database, and it is gone within the server's window (30 seconds by default) or on restart.
 
@@ -48,7 +54,8 @@ Okite runs on a hosting provider (Render). Infractions and message data are stor
 
 - Message index: 7 days. Message cache: 72 hours. Both only while an admin has message logs turned on for that server.
 - Infractions, including the text of any message cited in them: until a moderator deletes them (`/infraction delete`), or until the server's data is deleted.
-- Server settings, appeals and modmail tickets: until the server's data is deleted.
+- Server settings, appeals, modmail tickets and mod notes: until the server's data is deleted. Mod notes can also be removed by moderators with `/note remove`.
+- Temporary roles: until the role is removed.
 - When Okite is removed from a server, that server's stored data (settings, infractions, message index and cache, pending prompts, snapshots, counters) is deleted after 90 days. Adding Okite back within those 90 days keeps the data. Deletion runs automatically.
 
 ## Your choices and requests

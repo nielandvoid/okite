@@ -302,6 +302,25 @@ const commands = [
         .addStringOption(o => o.setName("nickname").setDescription("the new nickname (up to 32 characters, or reset)").setMaxLength(32)),
 
     new SlashCommandBuilder()
+        .setName("role")
+        .setDescription(help.role.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+        .addSubcommand(sub => sub.setName("add").setDescription("give a member a role")
+            .addUserOption(o => o.setName("user").setDescription("the member").setRequired(true))
+            .addRoleOption(o => o.setName("role").setDescription("the role to give").setRequired(true))
+            .addStringOption(o => o.setName("reason").setDescription("shown in the audit log").setMaxLength(300))
+            .addStringOption(o => o.setName("duration").setDescription("take it away again after this long, like 1h, 7d or 2w")))
+        .addSubcommand(sub => sub.setName("remove").setDescription("take a role from a member")
+            .addUserOption(o => o.setName("user").setDescription("the member").setRequired(true))
+            .addRoleOption(o => o.setName("role").setDescription("the role to take").setRequired(true))
+            .addStringOption(o => o.setName("reason").setDescription("shown in the audit log").setMaxLength(300)))
+        .addSubcommand(sub => sub.setName("create").setDescription("create a role with no permissions")
+            .addStringOption(o => o.setName("name").setDescription("the role name").setRequired(true).setMaxLength(100))
+            .addStringOption(o => o.setName("color").setDescription("hex code, like #7ee8a8"))
+            .addBooleanOption(o => o.setName("hoist").setDescription("show members with it separately in the member list"))
+            .addBooleanOption(o => o.setName("mentionable").setDescription("let anyone @mention it"))),
+
+    new SlashCommandBuilder()
         .setName("slowmode")
         .setDescription(help.slowmode.summary)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
@@ -406,6 +425,74 @@ const commands = [
                 .setDescription("the channel to unlock")
                 .setRequired(false)
         ),
+
+    new SlashCommandBuilder()
+        .setName("whois")
+        .setDescription(help.whois.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addUserOption(o => o.setName("user").setDescription("the user (defaults to you)")),
+
+    new SlashCommandBuilder()
+        .setName("note")
+        .setDescription(help.note.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addSubcommand(sub => sub.setName("add").setDescription("add a private mod note")
+            .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true))
+            .addStringOption(o => o.setName("text").setDescription("the note").setRequired(true).setMaxLength(1500)))
+        .addSubcommand(sub => sub.setName("list").setDescription("show the notes on a user")
+            .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true)))
+        .addSubcommand(sub => sub.setName("remove").setDescription("delete a note")
+            .addUserOption(o => o.setName("user").setDescription("the user").setRequired(true))
+            .addIntegerOption(o => o.setName("number").setDescription("the note's number from the list").setRequired(true).setMinValue(1))),
+
+    new SlashCommandBuilder()
+        .setName("modstats")
+        .setDescription(help.modstats.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addIntegerOption(o => o.setName("days").setDescription("how far back (default 30)").setMinValue(1).setMaxValue(365))
+        .addUserOption(o => o.setName("moderator").setDescription("only this mod")),
+
+    new SlashCommandBuilder()
+        .setName("serverinfo")
+        .setDescription(help.serverinfo.summary),
+
+    new SlashCommandBuilder()
+        .setName("roles")
+        .setDescription(help.roles.summary),
+
+    new SlashCommandBuilder()
+        .setName("voice")
+        .setDescription(help.voice.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.MoveMembers)
+        .addSubcommand(sub => sub.setName("move").setDescription("move a member, or everyone in a channel")
+            .addChannelOption(o => o.setName("to").setDescription("where to move them").addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice).setRequired(true))
+            .addUserOption(o => o.setName("user").setDescription("one member to move"))
+            .addChannelOption(o => o.setName("from").setDescription("move everyone in this channel (defaults to yours)").addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice))),
+
+    new SlashCommandBuilder()
+        .setName("joingate")
+        .setDescription(help.joingate.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addBooleanOption(o => o.setName("enabled").setDescription("turn the join gate on or off"))
+        .addIntegerOption(o => o.setName("days").setDescription("minimum account age in days (default 7)").setMinValue(1).setMaxValue(365))
+        .addStringOption(o => o.setName("action").setDescription("what happens to accounts that are too new").addChoices(
+            { name: "kick (they can rejoin once old enough)", value: "kick" },
+            { name: "mute (time them out)", value: "mute" },
+            { name: "log only", value: "log" }))
+        .addStringOption(o => o.setName("mute").setDescription("how long the mute lasts, like 1h or 1d"))
+        .addBooleanOption(o => o.setName("noavatar").setDescription("also catch accounts with no profile picture"))
+        .addUserOption(o => o.setName("allow").setDescription("let this user through anyway"))
+        .addUserOption(o => o.setName("unallow").setDescription("take a user off the allow list")),
+
+    new SlashCommandBuilder()
+        .setName("lockdown")
+        .setDescription(help.lockdown.summary)
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+        .addSubcommand(sub => sub.setName("on").setDescription("lock every public channel")
+            .addStringOption(o => o.setName("reason").setDescription("shown in the locked channels and the log").setMaxLength(500))
+            .addBooleanOption(o => o.setName("notice").setDescription("post a note in each locked channel (default on)")))
+        .addSubcommand(sub => sub.setName("off").setDescription("reopen every channel the lockdown closed"))
+        .addSubcommand(sub => sub.setName("status").setDescription("show whether a lockdown is running")),
 
     new SlashCommandBuilder()
         .setName("perms")
